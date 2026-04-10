@@ -26,6 +26,7 @@ pub fn evaluate(expr: &Expression, env: &mut Environment) -> Result<Literal, Run
         | ExpressionEnum::Term(op, left, right)
         | ExpressionEnum::Comparison(op, left, right)
         | ExpressionEnum::Equality(op, left, right) => eval_infix(op, left, right, &expr.span, env),
+        ExpressionEnum::Logical(op, left, right) => eval_logical(op, left, right, env),
         ExpressionEnum::Assignment(name, val) => {
             if let PrimaryEnum::Identifier(var_name) = &name.p {
                 let val = evaluate(val, env)?;
@@ -71,7 +72,7 @@ fn eval_infix(
     op: &Operator,
     left: &Expression,
     right: &Expression,
-    outer_span: &Span,
+    span: &Span,
     env: &mut Environment,
 ) -> Result<Literal, RuntimeError> {
     let left_val = evaluate(left, env)?;
@@ -143,7 +144,7 @@ fn eval_infix(
             _ => {
                 return Err(RuntimeError {
                     message: format!("Unsupported operator '{:?}'", op),
-                    span: outer_span.clone(),
+                    span: span.clone(),
                 });
             }
         };
@@ -155,7 +156,7 @@ fn eval_infix(
             "Runtime error: operator '{:?}' cannot be applied to values '{}' and '{}'",
             op, left_val, right_val
         ),
-        span: outer_span.clone(),
+        span: span.clone(),
     })
 }
 
@@ -198,8 +199,39 @@ fn eval_unary(
 /// Check a value for truthiness.
 ///
 /// In Lox, only "`false`" and "`nil`" are falsy; everything else is truthy.
-fn is_truthy(value: &Literal) -> bool {
+pub fn is_truthy(value: &Literal) -> bool {
     !matches!(value, Literal::False | Literal::Nil)
+}
+
+/// Evaluate a logical expression (AND/OR).  Implements short-circuiting semantics.
+fn eval_logical(
+    op: &Operator,
+    left: &Expression,
+    right: &Expression,
+    env: &mut Environment,
+) -> Result<Literal, RuntimeError> {
+    match op.op.as_str() {
+        "and" => {
+            let left_val = evaluate(left, env)?;
+            if !is_truthy(&left_val) {
+                Ok(left_val) // Short-circuit: return left operand if it's falsy
+            } else {
+                evaluate(right, env) // Otherwise evaluate and return right operand
+            }
+        }
+        "or" => {
+            let left_val = evaluate(left, env)?;
+            if is_truthy(&left_val) {
+                Ok(left_val) // Short-circuit: return left operand if it's truthy
+            } else {
+                evaluate(right, env) // Otherwise evaluate and return right operand
+            }
+        }
+        _ => Err(RuntimeError {
+            message: format!("Unsupported logical operator '{:?}'", op),
+            span: op.span.clone(),
+        }),
+    }
 }
 
 /// Format a runtime error with source code context and return it as a string.

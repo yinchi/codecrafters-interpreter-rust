@@ -30,6 +30,40 @@ impl ExprStmt {
     }
 }
 
+impl IfStmt {
+    pub fn new(
+        condition: Expression,
+        then_branch: Box<Statement>,
+        else_branch: Option<Box<Statement>>,
+        span: Span,
+        indent_depth: usize,
+    ) -> Self {
+        Self {
+            condition,
+            then_branch,
+            else_branch,
+            span,
+            indent_depth,
+        }
+    }
+}
+
+impl WhileStmt {
+    pub fn new(
+        condition: Expression,
+        body: Box<Statement>,
+        span: Span,
+        indent_depth: usize,
+    ) -> Self {
+        Self {
+            condition,
+            body,
+            span,
+            indent_depth,
+        }
+    }
+}
+
 impl Expression {
     pub fn new(expr: ExpressionEnum, span: Span) -> Self {
         Self { expr, span }
@@ -76,6 +110,9 @@ impl From<ExpressionEnum> for Expression {
                 Span::new(left.span.start.clone(), right.span.end.clone())
             }
             ExpressionEnum::Equality(_op, left, right) => {
+                Span::new(left.span.start.clone(), right.span.end.clone())
+            }
+            ExpressionEnum::Logical(_op, left, right) => {
                 Span::new(left.span.start.clone(), right.span.end.clone())
             }
 
@@ -149,11 +186,11 @@ impl Debug for Program {
 impl Debug for Declaration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Declaration::VarDecl(var_decl, scope_depth) => {
-                write!(f, "{}{:?}", " ".repeat(2 * scope_depth), var_decl)
+            Declaration::VarDecl(var_decl, indent_depth) => {
+                write!(f, "{}{:?}", " ".repeat(2 * indent_depth), var_decl)
             }
-            Declaration::Statement(stmt, scope_depth) => {
-                write!(f, "{}{:?}", " ".repeat(2 * scope_depth), stmt)
+            Declaration::Statement(stmt, indent_depth) => {
+                write!(f, "{}{:?}", " ".repeat(2 * indent_depth), stmt)
             }
         }
     }
@@ -175,16 +212,49 @@ impl Debug for Statement {
             // Just print the inner expression.
             Statement::ExprStmt(expr_stmt) => write!(f, "{:?}", expr_stmt),
             Statement::PrintStmt(print_stmt) => write!(f, "{:?}", print_stmt),
+
+            // The cases below may involve blocks (possibly multiple lines), so put each
+            // child on a new line and increase indentation by 2. For example:
+            //
+            // (if (== outer 1)
+            //   (print "outer is 1")
+            //   (if (== nested 2)
+            //     (print (+ "outer is not 1" "and nested is 2"))
+            //     (print (+ "outer is not 1" "and nested is not 2"))
+            //   )
+            // )
+            Statement::IfStmt(if_stmt) => {
+                let branch_indent = " ".repeat(2 * (if_stmt.indent_depth + 1));
+                let close_indent = " ".repeat(2 * if_stmt.indent_depth);
+                let mut result = format!(
+                    "(if {:?}\n{}{:?}",
+                    if_stmt.condition, branch_indent, if_stmt.then_branch
+                );
+                if let Some(else_branch) = &if_stmt.else_branch {
+                    result.push_str(&format!("\n{}{:?}", branch_indent, else_branch));
+                }
+                result.push_str(&format!("\n{})", close_indent));
+                write!(f, "{}", result)
+            }
+            Statement::WhileStmt(while_stmt) => {
+                let branch_indent = " ".repeat(2 * (while_stmt.indent_depth + 1));
+                let close_indent = " ".repeat(2 * while_stmt.indent_depth);
+                let result = format!(
+                    "(while {:?}\n{}{:?}\n{})",
+                    while_stmt.condition, branch_indent, while_stmt.body, close_indent
+                );
+                write!(f, "{}", result)
+            }
             Statement::Block(decls) => {
                 let mut result = String::from("(block");
 
                 // Push each declaration in the block on a new line, indented by 2 spaces per
-                //scope depth.
+                //indent depth.
                 for decl in decls {
                     result.push_str(&format!("\n{:?}", decl));
                 }
 
-                // Infer the scope depth of the block from the first declaration (if any) to
+                // Infer the indent depth of the block from the first declaration (if any) to
                 // determine how much to indent the closing parenthesis.
                 if let Some(first_decl) = decls.first() {
                     let inner_depth = match first_decl {
@@ -230,7 +300,8 @@ impl Debug for ExpressionEnum {
             ExpressionEnum::Factor(op, left, right)
             | ExpressionEnum::Term(op, left, right)
             | ExpressionEnum::Comparison(op, left, right)
-            | ExpressionEnum::Equality(op, left, right) => {
+            | ExpressionEnum::Equality(op, left, right)
+            | ExpressionEnum::Logical(op, left, right) => {
                 write!(f, "({:?} {:?} {:?})", op, left, right)
             }
             ExpressionEnum::Assignment(name, value) => write!(f, "(set! {:?} {:?})", name, value),

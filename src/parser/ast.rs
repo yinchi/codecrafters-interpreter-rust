@@ -17,8 +17,8 @@ pub struct Program {
 ///
 /// declaration     → varDecl | statement ;
 pub enum Declaration {
-    VarDecl(VarDecl, usize), // usize is the scope depth (used for parser output indentation)
-    Statement(Statement, usize), // usize is the scope depth (used for parser output indentation)
+    VarDecl(VarDecl, usize), // usize is the indent depth (used for parser output indentation)
+    Statement(Statement, usize), // usize is the indent depth (used for parser output indentation)
 }
 
 /// A variable declaration in the AST
@@ -31,14 +31,40 @@ pub struct VarDecl {
     pub span: Span,
 }
 
-/// A statement in the AST, which can be an expression statement, a print statement, or a block.
+/// A statement in the AST, which can be an expression statement, a print statement, a while
+/// statement, or a block.
 ///
-/// `statement      → exprStmt | printStmt | block ;`
+/// Note that we don't have a separate `for` statement in the AST, since we can desugar `for`
+/// loops into `while` loops in the parser.
+///
+/// `statement      → exprStmt | ifStmt | printStmt | whileStmt | forStmt | block ;`
 /// `block          → "{" declaration* "}" ;`
 pub enum Statement {
     ExprStmt(ExprStmt),
+    IfStmt(IfStmt),
     PrintStmt(PrintStmt),
+    WhileStmt(WhileStmt),
     Block(Vec<Declaration>),
+}
+
+/// An expression statement in the AST.
+///
+/// `exprStmt       → expression ";" ;`
+pub struct ExprStmt {
+    pub expr: Expression,
+    pub span: Span,
+}
+
+/// An if statement in the AST.
+///
+/// `ifStmt         → "if" "(" expression ")" statement ( "else" statement )? ;`
+pub struct IfStmt {
+    pub condition: Expression,
+    pub then_branch: Box<Statement>,
+    pub else_branch: Option<Box<Statement>>,
+    #[allow(unused)]
+    pub span: Span,
+    pub indent_depth: usize,
 }
 
 /// A print statement in the AST.
@@ -50,12 +76,15 @@ pub struct PrintStmt {
     pub span: Span,
 }
 
-/// An expression statement in the AST.
+/// A while statement in the AST.
 ///
-/// `exprStmt       → expression ";" ;`
-pub struct ExprStmt {
-    pub expr: Expression,
+/// `whileStmt      → "while" "(" expression ")" statement ;`
+pub struct WhileStmt {
+    pub condition: Expression,
+    pub body: Box<Statement>,
+    #[allow(unused)]
     pub span: Span,
+    pub indent_depth: usize,
 }
 
 /** An expression in the AST.
@@ -65,7 +94,10 @@ we have the following rules for expressions:
 
 ```
 expression     → assignment ;
-assignment     → IDENTIFIER "=" assignment | equality ;
+assignment     → IDENTIFIER "=" assignment
+               | logic_or ;
+logic_or       → logic_and ( "or" logic_and )* ;
+logic_and      → equality ( "and" equality )* ;
 equality       → comparison ( ( "!=" | "==" ) comparison )* ;
 comparison     → term ( ( ">" | ">=" | "<" | "<=" ) term )* ;
 term           → factor ( ( "-" | "+" ) factor )* ;
@@ -90,6 +122,7 @@ pub enum ExpressionEnum {
     Term(Operator, Box<Expression>, Box<Expression>),
     Comparison(Operator, Box<Expression>, Box<Expression>),
     Equality(Operator, Box<Expression>, Box<Expression>),
+    Logical(Operator, Box<Expression>, Box<Expression>),
     Assignment(Primary, Box<Expression>),
     // where Primary is the Identifier on the LHS
 }

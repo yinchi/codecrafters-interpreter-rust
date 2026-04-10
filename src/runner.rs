@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::evaluator::{RuntimeError, evaluate};
+use crate::evaluator::{RuntimeError, evaluate, is_truthy};
 use crate::parser::{ASTree, Declaration, Literal, Statement};
 
 /// Program state
@@ -87,7 +87,7 @@ fn run_decl(decl: &Declaration, state: &mut ProgramState) -> Result<(), RuntimeE
     match decl {
         Declaration::VarDecl(var_decl, _) => {
             // Handle variable declaration, defaulting to nil if no initializer present.
-            // We don't need to do anything special with the scope depth (_),
+            // We don't need to do anything special with the indent depth (_),
             // as `state.env` will already be the correct environment for this statement.
             let val = if let Some(initializer) = &var_decl.initializer {
                 evaluate(initializer, &mut state.env)?
@@ -97,7 +97,7 @@ fn run_decl(decl: &Declaration, state: &mut ProgramState) -> Result<(), RuntimeE
             state.env.vars.insert(var_decl.name.clone(), val);
         }
         Declaration::Statement(stmt, _) => {
-            // We don't need to do anything special with the scope depth (_),
+            // We don't need to do anything special with the indent depth (_),
             // as `state.env` will already be the correct environment for this statement.
             run_stmt(stmt, state)?;
         }
@@ -115,6 +115,19 @@ fn run_stmt(stmt: &Statement, state: &mut ProgramState) -> Result<(), RuntimeErr
         Statement::PrintStmt(print_stmt) => {
             let val = evaluate(&print_stmt.expr_stmt.expr, &mut state.env)?;
             println!("{}", val);
+        }
+        Statement::IfStmt(if_stmt) => {
+            let condition = evaluate(&if_stmt.condition, &mut state.env)?;
+            if is_truthy(&condition) {
+                run_stmt(&if_stmt.then_branch, state)?;
+            } else if let Some(else_branch) = &if_stmt.else_branch {
+                run_stmt(else_branch, state)?;
+            }
+        }
+        Statement::WhileStmt(while_stmt) => {
+            while is_truthy(&evaluate(&while_stmt.condition, &mut state.env)?) {
+                run_stmt(&while_stmt.body, state)?;
+            }
         }
         Statement::Block(decls) => {
             // Swap out the current env and make it the parent of a new child env.

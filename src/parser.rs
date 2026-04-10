@@ -304,12 +304,82 @@ fn parse_equality(tokens: &[Token], pos: &mut usize) -> Result<Expression, Strin
     Ok(left)
 }
 
-/// Parse an assignment expression, or fall down one level (equality) if no assignment operator is
+/// Parse a logic and expression, or fall down one level (equality) if no "and" operator is found.
+///
+/// `logic_and -> equality ( "and" equality )*`
+fn parse_logic_and(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
+    let mut left = parse_equality(tokens, pos)?;
+
+    // Consume "and" operators into `left` until we can't anymore.
+    while let Some(token) = tokens.get(*pos) {
+        if token.token_type == "AND" {
+            let op = Operator {
+                op: token.lexeme.clone(),
+                span: Span::new(
+                    Location::new(token.line, token.col),
+                    Location::new(token.line, token.col + token.lexeme.len()),
+                ),
+            };
+
+            *pos += 1;
+            let right = parse_equality(tokens, pos)?;
+            let span = Span::new(
+                Location::new(left.span.start.line, left.span.start.col),
+                Location::new(right.span.end.line, right.span.end.col),
+            );
+            left = Expression::new(
+                ExpressionEnum::Logical(op, Box::new(left), Box::new(right)),
+                span,
+            );
+        } else {
+            break;
+        }
+    }
+
+    Ok(left)
+}
+
+/// Parse an or expression, or fall down one level (and) if no "or" operator is found.
+///
+/// `logic_or -> logic_and ( "or" logic_and )*`
+fn parse_logic_or(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
+    let mut left = parse_logic_and(tokens, pos)?;
+
+    // Consume "or" operators into `left` until we can't anymore.
+    while let Some(token) = tokens.get(*pos) {
+        if token.token_type == "OR" {
+            let op = Operator {
+                op: token.lexeme.clone(),
+                span: Span::new(
+                    Location::new(token.line, token.col),
+                    Location::new(token.line, token.col + token.lexeme.len()),
+                ),
+            };
+
+            *pos += 1;
+            let right = parse_logic_and(tokens, pos)?;
+            let span = Span::new(
+                Location::new(left.span.start.line, left.span.start.col),
+                Location::new(right.span.end.line, right.span.end.col),
+            );
+            left = Expression::new(
+                ExpressionEnum::Logical(op, Box::new(left), Box::new(right)),
+                span,
+            );
+        } else {
+            break;
+        }
+    }
+
+    Ok(left)
+}
+
+/// Parse an assignment expression, or fall down one level (logic_or) if no assignment operator is
 /// present.
 ///
-/// `assignment -> IDENTIFIER "=" assignment | equality`
+/// `assignment -> IDENTIFIER "=" assignment | logic_or`
 fn parse_assignment(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
-    let left = parse_equality(tokens, pos)?;
+    let left = parse_logic_or(tokens, pos)?;
 
     if let Some(token) = tokens.get(*pos)
         && token.token_type == "EQUAL"
@@ -350,7 +420,7 @@ fn parse_expression(tokens: &[Token], pos: &mut usize) -> Result<Expression, Str
 fn parse_expr_stmt(
     tokens: &[Token],
     pos: &mut usize,
-    scope_depth: usize,
+    indent_depth: usize,
 ) -> Result<ASTree, String> {
     let expr = parse_expression(tokens, pos)?;
 
@@ -364,7 +434,7 @@ fn parse_expr_stmt(
             );
             Ok(ASTree::Declaration(Declaration::Statement(
                 Statement::ExprStmt(ExprStmt::new(expr, span)),
-                scope_depth,
+                indent_depth,
             )))
         }
         _ => {
@@ -381,7 +451,7 @@ fn parse_expr_stmt(
 fn parse_print_stmt(
     tokens: &[Token],
     pos: &mut usize,
-    scope_depth: usize,
+    indent_depth: usize,
 ) -> Result<ASTree, String> {
     // `print` acts like a unary operator, so reuse the unary parsing logic to consume it
     // if it's there.
@@ -390,11 +460,11 @@ fn parse_print_stmt(
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     if token.token_type == "PRINT" {
         *pos += 1; // consume 'print'
-        let my_evaluable = parse_expr_stmt(tokens, pos, scope_depth)?;
+        let my_evaluable = parse_expr_stmt(tokens, pos, indent_depth)?;
         // Check that expr is an expression statement
         if let ASTree::Declaration(Declaration::Statement(
             Statement::ExprStmt(expr_stmt),
-            scope_depth,
+            indent_depth,
         )) = my_evaluable
         {
             let span = Span::new(
@@ -403,7 +473,7 @@ fn parse_print_stmt(
             );
             Ok(ASTree::Declaration(Declaration::Statement(
                 Statement::PrintStmt(PrintStmt::new(expr_stmt, span)),
-                scope_depth,
+                indent_depth,
             )))
         } else {
             Err(format!(
@@ -413,14 +483,14 @@ fn parse_print_stmt(
         }
     } else {
         // No match => go to the next rule
-        parse_expr_stmt(tokens, pos, scope_depth)
+        parse_expr_stmt(tokens, pos, indent_depth)
     }
 }
 
-/// Parse a block statement.
+/// Parse a block statement.  Triggered only when we see `{`, thus no fall-through.
 ///
 /// `block → "{" declaration* "}"`
-fn parse_block(tokens: &[Token], pos: &mut usize, scope_depth: usize) -> Result<ASTree, String> {
+fn parse_block(tokens: &[Token], pos: &mut usize, indent_depth: usize) -> Result<ASTree, String> {
     let open_brace_line = tokens[*pos].line;
     let open_brace_col = tokens[*pos].col;
     *pos += 1; // consume '{'
@@ -432,7 +502,7 @@ fn parse_block(tokens: &[Token], pos: &mut usize, scope_depth: usize) -> Result<
                 *pos += 1; // consume '}'
                 return Ok(ASTree::Declaration(Declaration::Statement(
                     Statement::Block(decls),
-                    scope_depth,
+                    indent_depth,
                 )));
             }
             Some(token) if token.token_type == "EOF" => {
@@ -447,7 +517,7 @@ fn parse_block(tokens: &[Token], pos: &mut usize, scope_depth: usize) -> Result<
                     open_brace_line, open_brace_col
                 ));
             }
-            _ => match parse_declaration(tokens, pos, scope_depth + 1)? {
+            _ => match parse_declaration(tokens, pos, indent_depth + 1)? {
                 ASTree::Declaration(decl) => decls.push(decl),
                 ASTree::Expr(_) => {
                     // Bare expression found inside block.
@@ -478,23 +548,391 @@ fn parse_block(tokens: &[Token], pos: &mut usize, scope_depth: usize) -> Result<
     }
 }
 
-/// Parse a statement, which can be a block, print statement, or expression statement.
-/// Expression statements are detected by falling through from `parse_print_stmt` if no "print"
-/// token is found.
+/// Parse an if statement. Triggered only when we see `if`, thus no fall-through.
 ///
-/// `statement → block | printStmt | exprStmt`
+/// `ifStmt         → "if" "(" expression ")" statement ( "else" statement )? ;`
+fn parse_if_stmt(tokens: &[Token], pos: &mut usize, indent_depth: usize) -> Result<ASTree, String> {
+    let if_pos = *pos;
+    *pos += 1; // consume 'if'
+
+    // Check for '('
+    let left_paren_token = tokens
+        .get(*pos)
+        .ok_or_else(|| "Unexpected end of input.".to_string())?;
+    if left_paren_token.token_type != "LEFT_PAREN" {
+        return Err(format!(
+            "[line {}:{}] Syntax error: expected '(' after 'if', but found '{}'.",
+            left_paren_token.line, left_paren_token.col, left_paren_token.lexeme
+        ));
+    }
+    *pos += 1; // consume '('
+
+    let condition = parse_expression(tokens, pos)?;
+
+    // Check for ')'
+    let right_paren_token = tokens
+        .get(*pos)
+        .ok_or_else(|| "Unexpected end of input.".to_string())?;
+    if right_paren_token.token_type != "RIGHT_PAREN" {
+        return Err(format!(
+            "[line {}:{}] Syntax error: expected ')' after if condition, but found '{}'.",
+            right_paren_token.line, right_paren_token.col, right_paren_token.lexeme
+        ));
+    }
+    *pos += 1; // consume ')'
+
+    let then_branch = Box::new(match parse_statement(tokens, pos, indent_depth + 1)? {
+        ASTree::Declaration(Declaration::Statement(stmt, _)) => stmt,
+        ASTree::Declaration(Declaration::VarDecl(..)) => {
+            return Err(format!(
+                "[line {}:{}] Syntax error: variable declaration not allowed directly inside 'if' statement. Use a block to create an inner scope.",
+                tokens[*pos - 1].line,
+                tokens[*pos - 1].col
+            ));
+        }
+        ASTree::Expr(_) => {
+            return Err(format!(
+                "[line {}:{}] Syntax error: expected statement after if condition.",
+                tokens[*pos - 1].line,
+                tokens[*pos - 1].col
+            ));
+        }
+        ASTree::Program(_) => unreachable!(),
+    });
+
+    // Check for optional "else" branch and consume if present.
+    let else_branch = if let Some(token) = tokens.get(*pos)
+        && token.token_type == "ELSE"
+    {
+        *pos += 1; // consume 'else'
+        Some(Box::new(
+            match parse_statement(tokens, pos, indent_depth + 1)? {
+                ASTree::Declaration(Declaration::Statement(stmt, _)) => stmt,
+                ASTree::Declaration(Declaration::VarDecl(..)) => {
+                    return Err(format!(
+                        "[line {}:{}] Syntax error: variable declaration not allowed directly inside 'else' statement. Use a block to create an inner scope.",
+                        tokens[*pos - 1].line,
+                        tokens[*pos - 1].col
+                    ));
+                }
+                ASTree::Expr(_) => {
+                    return Err(format!(
+                        "[line {}:{}] Syntax error: expected statement after 'else'.",
+                        tokens[*pos - 1].line,
+                        tokens[*pos - 1].col
+                    ));
+                }
+                ASTree::Program(_) => unreachable!(),
+            },
+        ))
+    } else {
+        None
+    };
+
+    // pos should now be past the end of the if statement,
+    // so subtract 1 to get the end of the statement for the span.
+    let span = Span::new(
+        Location::new(tokens[if_pos].line, tokens[if_pos].col),
+        Location::new(tokens[*pos - 1].line, tokens[*pos - 1].col),
+    );
+
+    Ok(ASTree::Declaration(Declaration::Statement(
+        Statement::IfStmt(IfStmt::new(
+            condition,
+            then_branch,
+            else_branch,
+            span,
+            indent_depth,
+        )),
+        indent_depth,
+    )))
+}
+
+/// Parse a while statement. Triggered only when we see `while`, thus no fall-through.
+///
+/// `whileStmt      → "while" "(" expression ")" statement ;`
+fn parse_while_stmt(
+    tokens: &[Token],
+    pos: &mut usize,
+    indent_depth: usize,
+) -> Result<ASTree, String> {
+    let while_pos = *pos;
+    *pos += 1; // consume 'while'
+
+    // Check for '('
+    let left_paren_token = tokens
+        .get(*pos)
+        .ok_or_else(|| "Unexpected end of input.".to_string())?;
+    if left_paren_token.token_type != "LEFT_PAREN" {
+        return Err(format!(
+            "[line {}:{}] Syntax error: expected '(' after 'while', but found '{}'.",
+            left_paren_token.line, left_paren_token.col, left_paren_token.lexeme
+        ));
+    }
+    *pos += 1; // consume '('
+
+    let condition = parse_expression(tokens, pos)?;
+
+    // Check for ')'
+    let right_paren_token = tokens
+        .get(*pos)
+        .ok_or_else(|| "Unexpected end of input.".to_string())?;
+    if right_paren_token.token_type != "RIGHT_PAREN" {
+        return Err(format!(
+            "[line {}:{}] Syntax error: expected ')' after while condition, but found '{}'.",
+            right_paren_token.line, right_paren_token.col, right_paren_token.lexeme
+        ));
+    }
+    *pos += 1; // consume ')'
+
+    // Parse the body of the while loop as a statement.
+    // Note that in Lox, any statement type is allowed as the loop body.
+    let body = Box::new(match parse_statement(tokens, pos, indent_depth + 1)? {
+        ASTree::Declaration(Declaration::Statement(stmt, _)) => stmt,
+        ASTree::Declaration(Declaration::VarDecl(..)) => {
+            return Err(format!(
+                "[line {}:{}] Syntax error: variable declaration not allowed directly inside 'while' statement. Use a block to create an inner scope.",
+                tokens[*pos - 1].line,
+                tokens[*pos - 1].col
+            ));
+        }
+        ASTree::Expr(_) => {
+            return Err(format!(
+                "[line {}:{}] Syntax error: expected statement after while condition.",
+                tokens[*pos - 1].line,
+                tokens[*pos - 1].col
+            ));
+        }
+        ASTree::Program(_) => unreachable!(),
+    });
+
+    // pos should now be past the end of the while statement,
+    // so subtract 1 to get the end of the statement for the span.
+    let span = Span::new(
+        Location::new(tokens[while_pos].line, tokens[while_pos].col),
+        Location::new(tokens[*pos - 1].line, tokens[*pos - 1].col),
+    );
+
+    Ok(ASTree::Declaration(Declaration::Statement(
+        Statement::WhileStmt(WhileStmt::new(condition, body, span, indent_depth)),
+        indent_depth,
+    )))
+}
+
+/// Parse a for statement, applying desugaring to transform it into a while statement.
+/// Triggered only when we see `for`, thus no fall-through.
+///
+/// Inserted into the AST as:
+/// (block
+///     (<dset! or set!> <name> <value>)?  ; loop variable declaration or assignment
+///     (while
+///         <condition or true(default)>   ; optional loop condition, e.g. true or (< i 10)
+///         (block
+///             (block <body>)             ; original loop body in its own nested scope
+///             <increment>?               ; optional increment expression, e.g. (set! i (+ i 1))
+///         )
+///     )
+/// )
+///
+/// `forStmt         → "for" "(" ( varDecl | exprStmt | ";" ) expression? ";" expression? ")" statement ;`
+fn parse_for_stmt(
+    tokens: &[Token],
+    pos: &mut usize,
+    indent_depth: usize,
+) -> Result<ASTree, String> {
+    let for_pos = *pos;
+    *pos += 1; // consume 'for'
+
+    // Check for '('
+    let left_paren_token = tokens
+        .get(*pos)
+        .ok_or_else(|| "Unexpected end of input.".to_string())?;
+    if left_paren_token.token_type != "LEFT_PAREN" {
+        return Err(format!(
+            "[line {}:{}] Syntax error: expected '(' after 'for', but found '{}'.",
+            left_paren_token.line, left_paren_token.col, left_paren_token.lexeme
+        ));
+    }
+    *pos += 1; // consume '('
+
+    // Parse the initializer, which can be a variable declaration, an expression statement, or empty.
+    let initializer = if let Some(token) = tokens.get(*pos) {
+        if token.token_type == "SEMICOLON" {
+            *pos += 1; // consume ';'
+            None
+        } else if token.token_type == "VAR" {
+            Some(parse_var_decl(tokens, pos, indent_depth + 1)?)
+        } else {
+            Some(parse_expr_stmt(tokens, pos, indent_depth + 1)?)
+        }
+    } else {
+        return Err("Unexpected end of input.".to_string());
+    };
+
+    // Extract the initializer declaration if it exists, so we can put it in the desugared block.
+    let init_decl = match initializer {
+        Some(ASTree::Declaration(decl)) => Some(decl),
+        Some(ASTree::Expr(_)) => {
+            return Err(format!(
+                "[line {}:{}] Syntax error: expected variable declaration or expression statement in for loop initializer.",
+                tokens[*pos - 1].line,
+                tokens[*pos - 1].col
+            ));
+        }
+        Some(ASTree::Program(_)) => unreachable!(),
+        None => None,
+    };
+
+    // Parse the condition, which is an optional expression followed by a semicolon.
+    let condition = if let Some(token) = tokens.get(*pos) {
+        if token.token_type == "SEMICOLON" {
+            None
+        } else {
+            Some(parse_expression(tokens, pos)?)
+        }
+    } else {
+        return Err("Unexpected end of input.".to_string());
+    };
+    // Check for ';' after condition
+    let semicolon_after_condition = tokens
+        .get(*pos)
+        .ok_or_else(|| "Unexpected end of input.".to_string())?;
+    if semicolon_after_condition.token_type != "SEMICOLON" {
+        return Err(format!(
+            "[line {}:{}] Syntax error: expected ';' after for loop condition, but found '{}'.",
+            semicolon_after_condition.line,
+            semicolon_after_condition.col,
+            semicolon_after_condition.lexeme
+        ));
+    }
+    *pos += 1; // consume ';'
+
+    // Parse the increment, which is an optional expression followed by a right parenthesis.
+    let increment = if let Some(token) = tokens.get(*pos) {
+        if token.token_type == "RIGHT_PAREN" {
+            None
+        } else {
+            Some(parse_expression(tokens, pos)?)
+        }
+    } else {
+        return Err("Unexpected end of input.".to_string());
+    };
+    // Check for ')' after increment
+    let right_paren_token = tokens
+        .get(*pos)
+        .ok_or_else(|| "Unexpected end of input.".to_string())?;
+    if right_paren_token.token_type != "RIGHT_PAREN" {
+        return Err(format!(
+            "[line {}:{}] Syntax error: expected ')' after for loop increment, but found '{}'.",
+            right_paren_token.line, right_paren_token.col, right_paren_token.lexeme
+        ));
+    }
+    *pos += 1; // consume ')'
+
+    // Parse the body of the for loop as a statement.
+    let body = Box::new(match parse_statement(tokens, pos, indent_depth + 1)? {
+        ASTree::Declaration(Declaration::Statement(stmt, _)) => stmt,
+        ASTree::Declaration(Declaration::VarDecl(..)) => {
+            return Err(format!(
+                "[line {}:{}] Syntax error: variable declaration not allowed directly inside 'for' statement body. Use a block to create an inner scope.",
+                tokens[*pos - 1].line,
+                tokens[*pos - 1].col
+            ));
+        }
+        ASTree::Expr(_) => {
+            return Err(format!(
+                "[line {}:{}] Syntax error: expected statement as body of 'for' loop.",
+                tokens[*pos - 1].line,
+                tokens[*pos - 1].col
+            ));
+        }
+        ASTree::Program(_) => unreachable!(),
+    });
+
+    // pos should now be past the end of the for statement,
+    // so subtract 1 to get the end of the statement for the span.
+    let span = Span::new(
+        Location::new(tokens[for_pos].line, tokens[for_pos].col),
+        Location::new(tokens[*pos - 1].line, tokens[*pos - 1].col),
+    );
+
+    // We now have initializer as Option<ASTree>, condition as Option<Expression>,
+    // increment as Option<Expression>, and body as Box<Statement>.
+    // We need to desugar this into a while loop as described in the comment above.
+
+    let desugared_body = if let Some(increment_expr) = increment {
+        let new_span = increment_expr.span.clone();
+        Statement::Block(vec![
+            Declaration::Statement(*body, indent_depth + 1),
+            Declaration::Statement(
+                Statement::ExprStmt(ExprStmt::new(increment_expr, new_span)),
+                indent_depth + 1,
+            ),
+        ])
+    } else {
+        // No increment, so the body stays the same.
+        *body
+    };
+
+    let desugared_while = Statement::WhileStmt(WhileStmt::new(
+        condition.unwrap_or_else(|| {
+            Expression::new(
+                ExpressionEnum::Primary(Primary::new(
+                    PrimaryEnum::Literal(Literal::True),
+                    span.clone(),
+                )),
+                // Use the entire FOR's span as the span for the implied `true` condition literal.
+                span.clone(),
+            )
+        }),
+        Box::new(desugared_body),
+        span.clone(),
+        indent_depth + 1,
+    ));
+
+    // If there is an initializer, the desugared for loop is a block containing the initializer.
+    // Otherwise, it's a block containing just the desugared while loop.
+    let desugared_for = if let Some(init) = init_decl {
+        Statement::Block(vec![
+            init,
+            Declaration::Statement(desugared_while, indent_depth + 1),
+        ])
+    } else {
+        Statement::Block(vec![Declaration::Statement(
+            desugared_while,
+            indent_depth + 1,
+        )])
+    };
+
+    Ok(ASTree::Declaration(Declaration::Statement(
+        desugared_for,
+        indent_depth,
+    )))
+}
+
+/// Parse a statement, which can be a block, print statement, while statement, or expression
+/// statement. Expression statements are detected by falling through from `parse_print_stmt` if
+/// no "print" token is found.
+///
+/// `statement → block | ifStmt | printStmt | whileStmt | exprStmt`
 fn parse_statement(
     tokens: &[Token],
     pos: &mut usize,
-    scope_depth: usize,
+    indent_depth: usize,
 ) -> Result<ASTree, String> {
     let token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     if token.token_type == "LEFT_BRACE" {
-        parse_block(tokens, pos, scope_depth)
+        parse_block(tokens, pos, indent_depth)
+    } else if token.token_type == "IF" {
+        parse_if_stmt(tokens, pos, indent_depth)
+    } else if token.token_type == "WHILE" {
+        parse_while_stmt(tokens, pos, indent_depth)
+    } else if token.token_type == "FOR" {
+        parse_for_stmt(tokens, pos, indent_depth)
     } else {
-        parse_print_stmt(tokens, pos, scope_depth)
+        parse_print_stmt(tokens, pos, indent_depth)
     }
 }
 
@@ -502,7 +940,11 @@ fn parse_statement(
 /// declaration is found.
 ///
 /// `varDecl -> "var" IDENTIFIER ( "=" expression )? ";"`
-fn parse_var_decl(tokens: &[Token], pos: &mut usize, scope_depth: usize) -> Result<ASTree, String> {
+fn parse_var_decl(
+    tokens: &[Token],
+    pos: &mut usize,
+    indent_depth: usize,
+) -> Result<ASTree, String> {
     let token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
@@ -555,11 +997,11 @@ fn parse_var_decl(tokens: &[Token], pos: &mut usize, scope_depth: usize) -> Resu
         );
         Ok(ASTree::Declaration(Declaration::VarDecl(
             VarDecl::new(name, initializer, span),
-            scope_depth,
+            indent_depth,
         )))
     } else {
         // No match => go to the next rule
-        parse_statement(tokens, pos, scope_depth)
+        parse_statement(tokens, pos, indent_depth)
     }
 }
 
@@ -569,9 +1011,9 @@ fn parse_var_decl(tokens: &[Token], pos: &mut usize, scope_depth: usize) -> Resu
 fn parse_declaration(
     tokens: &[Token],
     pos: &mut usize,
-    scope_depth: usize,
+    indent_depth: usize,
 ) -> Result<ASTree, String> {
-    parse_var_decl(tokens, pos, scope_depth)
+    parse_var_decl(tokens, pos, indent_depth)
 }
 
 /// Sentinel returned by `parse_program` when the input is not a program (no declarations

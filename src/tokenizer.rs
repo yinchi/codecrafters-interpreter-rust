@@ -7,8 +7,12 @@ use crate::format::format_num;
 /// Possible states for the tokenizer's finite-state machine.
 enum TokenizerState {
     Default,
-    WaitingEquals(String, String), // ! = < > (may be followed by =)
-    WaitingSlash,                  // / may be followed by / (start of comment)
+
+    // ! = < > (may be followed by =)
+    // Parameters are the token type and lexeme to emit if the next character is not '='.
+    WaitingEquals(String, String),
+
+    WaitingSlash, // / may be followed by / (start of comment)
     Comment,
     Number(String),     // Accumulate digits for number literals (no dot yet)
     NumberDot(String),  // Accumulate digits for number literals that have a dot
