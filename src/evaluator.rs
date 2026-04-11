@@ -5,10 +5,17 @@
 //! when the user runs in "evaluate" mode and a single expression is found by the parser
 //! (else an error is raised).
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use super::EXIT_CODE_RUNTIME_ERROR;
+use crate::builtins::BuiltIns;
+use crate::environment::Environment;
 use crate::parser::ast::{Expression, ExpressionEnum, Literal, Operator, Primary, PrimaryEnum};
 use crate::parser::span::Span;
-use crate::runner::Environment;
+use crate::runner::{ProgramState, run_stmt};
+
+type EnvRc = Rc<RefCell<Environment>>;
 
 /// An error that occurs during evaluation of an expression, e.g. division by zero or
 /// operations on incompatible types.
@@ -17,20 +24,42 @@ pub struct RuntimeError {
     pub span: Span,
 }
 
+/// The error type for the runner: either a runtime error or a return signal.
+pub enum RunError {
+    RuntimeError(RuntimeError),
+    ReturnSignal(Literal),
+}
+
+impl From<RuntimeError> for RunError {
+    fn from(e: RuntimeError) -> Self {
+        RunError::RuntimeError(e)
+    }
+}
+
 /// Evaluates an expression in the AST and returns its value as a string.
-pub fn evaluate(expr: &Expression, env: &mut Environment) -> Result<Literal, RuntimeError> {
+pub fn evaluate(
+    expr: &Expression,
+    env: &EnvRc,
+    builtins: &Rc<BuiltIns>,
+) -> Result<Literal, RuntimeError> {
     match &expr.expr {
-        ExpressionEnum::Primary(p) => eval_primary(p, env),
-        ExpressionEnum::Unary(op, right) => eval_unary(op, right, env),
+        ExpressionEnum::Primary(p) => eval_primary(p, env, builtins),
+
+        ExpressionEnum::Unary(op, right) => eval_unary(op, right, &expr.span, env, builtins),
+
         ExpressionEnum::Factor(op, left, right)
         | ExpressionEnum::Term(op, left, right)
         | ExpressionEnum::Comparison(op, left, right)
-        | ExpressionEnum::Equality(op, left, right) => eval_infix(op, left, right, &expr.span, env),
-        ExpressionEnum::Logical(op, left, right) => eval_logical(op, left, right, env),
+        | ExpressionEnum::Equality(op, left, right) => {
+            eval_infix(op, left, right, &expr.span, env, builtins)
+        }
+
+        ExpressionEnum::Logical(op, left, right) => eval_logical(op, left, right, env, builtins),
+
         ExpressionEnum::Assignment(name, val) => {
             if let PrimaryEnum::Identifier(var_name) = &name.p {
-                let val = evaluate(val, env)?;
-                if env.set_var(var_name, val.clone()) {
+                let val = evaluate(val, env, builtins)?;
+                if env.borrow_mut().set_var(var_name, val.clone()) {
                     Ok(val)
                 } else {
                     Err(RuntimeError {
@@ -39,21 +68,97 @@ pub fn evaluate(expr: &Expression, env: &mut Environment) -> Result<Literal, Run
                     })
                 }
             } else {
-                Err(RuntimeError {
-                    message: "Runtime error: invalid assignment target".into(),
-                    span: name.span.clone(),
-                })
+                unreachable!() // parser only creates Assignment with an Identifier LHS
+            }
+        }
+
+        ExpressionEnum::Call(callee, args) => {
+            // Special case: built-in functions are identified by name and stored separately
+            // from user-defined functions, so we check for them first.
+            if let ExpressionEnum::Primary(Primary {
+                p: PrimaryEnum::Identifier(func_name),
+                ..
+            }) = &callee.expr
+                && let Some(func) = builtins.functions.get(func_name)
+            {
+                let arg_vals = args
+                    .args
+                    .iter()
+                    .map(|arg| evaluate(arg, env, builtins))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return match func(&arg_vals) {
+                    Ok(result) => Ok(result),
+                    Err(e) => Err(RuntimeError {
+                        message: e.message,
+                        span: args.span.clone(),
+                    }),
+                };
+            }
+
+            // General case: evaluate the callee to get a value, then call it if it's a Callable.
+            // This naturally handles simple identifiers, chained calls like `f()()`, etc.
+            let callee_val = evaluate(callee, env, builtins)?;
+            match callee_val {
+                Literal::Callable(callable) => {
+                    let arity = callable.decl.params.len();
+                    if args.args.len() != arity {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "Runtime error: expected {} arguments but got {}",
+                                arity,
+                                args.args.len()
+                            ),
+                            span: expr.span.clone(),
+                        });
+                    }
+
+                    // Evaluate arguments before touching the environment.
+                    let arg_vals: Vec<Literal> = args
+                        .args
+                        .iter()
+                        .map(|arg| evaluate(arg, env, builtins))
+                        .collect::<Result<Vec<_>, RuntimeError>>()?;
+
+                    // Build the function's own scope with the closure as parent (lexical scoping).
+                    let mut fn_env = Environment::new();
+                    fn_env.parent = Some(Rc::clone(&callable.closure));
+
+                    // Bind the function's parameters to the argument values in the function scope.
+                    for (param, val) in callable.decl.params.iter().zip(arg_vals) {
+                        fn_env.vars.insert(param.clone(), val);
+                    }
+
+                    let mut state = ProgramState {
+                        env: Rc::new(RefCell::new(fn_env)),
+                        builtins: builtins.clone(),
+                    };
+
+                    // Evaluate the function body, catching ReturnSignal as a normal return value.
+                    match run_stmt(&callable.decl.body, &mut state) {
+                        Ok(val) => Ok(val),
+                        Err(RunError::ReturnSignal(val)) => Ok(val),
+                        Err(RunError::RuntimeError(e)) => Err(e),
+                    }
+                }
+                _ => Err(RuntimeError {
+                    message: "Runtime error: calling a non-callable value".into(),
+                    span: callee.span.clone(),
+                }),
             }
         }
     }
 }
 
 /// Evaluates a primary expression, which can be a literal, grouping, or identifier.
-fn eval_primary(primary: &Primary, env: &mut Environment) -> Result<Literal, RuntimeError> {
+fn eval_primary(
+    primary: &Primary,
+    env: &EnvRc,
+    builtins: &Rc<BuiltIns>,
+) -> Result<Literal, RuntimeError> {
     match &primary.p {
         PrimaryEnum::Literal(lit) => Ok(lit.clone()),
-        PrimaryEnum::Grouping(expr) => evaluate(expr, env),
-        PrimaryEnum::Identifier(name) => match env.get_var(name) {
+        PrimaryEnum::Grouping(expr) => evaluate(expr, env, builtins),
+        PrimaryEnum::Identifier(name) => match env.borrow().get_var(name) {
             Some(val) => Ok(val.clone()),
             None => Err(RuntimeError {
                 message: format!("Runtime error: undefined variable '{}'", name),
@@ -73,10 +178,11 @@ fn eval_infix(
     left: &Expression,
     right: &Expression,
     span: &Span,
-    env: &mut Environment,
+    env: &EnvRc,
+    builtins: &Rc<BuiltIns>,
 ) -> Result<Literal, RuntimeError> {
-    let left_val = evaluate(left, env)?;
-    let right_val = evaluate(right, env)?;
+    let left_val = evaluate(left, env, builtins)?;
+    let right_val = evaluate(right, env, builtins)?;
 
     // String concatenation with "+"
     if op.op.as_str() == "+"
@@ -141,12 +247,7 @@ fn eval_infix(
             }
             "+" => l + r,
             "-" => l - r,
-            _ => {
-                return Err(RuntimeError {
-                    message: format!("Unsupported operator '{:?}'", op),
-                    span: span.clone(),
-                });
-            }
+            _ => unreachable!(), // Factor/Term can only be *, /, +, -
         };
         return Ok(Literal::Number(result));
     }
@@ -164,9 +265,11 @@ fn eval_infix(
 fn eval_unary(
     op: &Operator,
     right: &Expression,
-    env: &mut Environment,
+    span: &Span,
+    env: &EnvRc,
+    builtins: &Rc<BuiltIns>,
 ) -> Result<Literal, RuntimeError> {
-    let right_val = evaluate(right, env)?;
+    let right_val = evaluate(right, env, builtins)?;
     match op.op.as_str() {
         "-" => {
             // Try to parse right_val as a number, negate it, and return the result as a string
@@ -177,7 +280,7 @@ fn eval_unary(
                         "Runtime error: cannot apply unary '-' to non-number value '{}'",
                         right_val
                     ),
-                    span: right.span.clone(),
+                    span: span.clone(),
                 }),
             }
         }
@@ -189,10 +292,7 @@ fn eval_unary(
                 Ok(Literal::True)
             }
         }
-        _ => Err(RuntimeError {
-            message: format!("Unsupported unary operator '{:?}'", op),
-            span: right.span.clone(),
-        }),
+        _ => unreachable!(), // parser only creates Unary for '-' and '!'
     }
 }
 
@@ -208,29 +308,27 @@ fn eval_logical(
     op: &Operator,
     left: &Expression,
     right: &Expression,
-    env: &mut Environment,
+    env: &EnvRc,
+    builtins: &Rc<BuiltIns>,
 ) -> Result<Literal, RuntimeError> {
     match op.op.as_str() {
         "and" => {
-            let left_val = evaluate(left, env)?;
+            let left_val = evaluate(left, env, builtins)?;
             if !is_truthy(&left_val) {
                 Ok(left_val) // Short-circuit: return left operand if it's falsy
             } else {
-                evaluate(right, env) // Otherwise evaluate and return right operand
+                evaluate(right, env, builtins) // Otherwise evaluate and return right operand
             }
         }
         "or" => {
-            let left_val = evaluate(left, env)?;
+            let left_val = evaluate(left, env, builtins)?;
             if is_truthy(&left_val) {
                 Ok(left_val) // Short-circuit: return left operand if it's truthy
             } else {
-                evaluate(right, env) // Otherwise evaluate and return right operand
+                evaluate(right, env, builtins) // Otherwise evaluate and return right operand
             }
         }
-        _ => Err(RuntimeError {
-            message: format!("Unsupported logical operator '{:?}'", op),
-            span: op.span.clone(),
-        }),
+        _ => unreachable!(), // parser only creates Logical for 'and' and 'or'
     }
 }
 

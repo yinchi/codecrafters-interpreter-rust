@@ -1,12 +1,19 @@
 //! Abstract Syntax Tree (AST) definitions for the Lox interpreter.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use super::span::Span;
+use crate::environment::Environment;
 
 pub mod impls;
+
+type EnvRc = Rc<RefCell<Environment>>;
 
 /// A Lox program (top-level AST node)
 ///
 /// program        → declaration* EOF ;
+#[derive(derive_new::new)]
 pub struct Program {
     pub declarations: Vec<Declaration>,
     #[allow(unused)]
@@ -15,15 +22,29 @@ pub struct Program {
 
 /// A declaration in the AST
 ///
-/// declaration     → varDecl | statement ;
+/// declaration     → funDecl | varDecl | statement ;
 pub enum Declaration {
+    FunDecl(FunDecl, usize), // usize is the indent depth (used for parser output indentation)
     VarDecl(VarDecl, usize), // usize is the indent depth (used for parser output indentation)
     Statement(Statement, usize), // usize is the indent depth (used for parser output indentation)
+}
+
+/// A function declaration in the AST
+///
+/// funDecl         → "fun" IDENTIFIER "(" parameters? ")" block ;
+#[derive(derive_new::new)]
+pub struct FunDecl {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Rc<Statement>, // the block statement representing the function body
+    #[allow(unused)]
+    pub span: Span,
 }
 
 /// A variable declaration in the AST
 ///
 /// varDecl         → "var" IDENTIFIER ( "=" expression )? ";" ;
+#[derive(derive_new::new)]
 pub struct VarDecl {
     pub name: String,
     pub initializer: Option<Expression>,
@@ -43,6 +64,7 @@ pub enum Statement {
     ExprStmt(ExprStmt),
     IfStmt(IfStmt),
     PrintStmt(PrintStmt),
+    ReturnStmt(ReturnStmt),
     WhileStmt(WhileStmt),
     Block(Vec<Declaration>),
 }
@@ -50,6 +72,7 @@ pub enum Statement {
 /// An expression statement in the AST.
 ///
 /// `exprStmt       → expression ";" ;`
+#[derive(derive_new::new)]
 pub struct ExprStmt {
     pub expr: Expression,
     pub span: Span,
@@ -58,6 +81,7 @@ pub struct ExprStmt {
 /// An if statement in the AST.
 ///
 /// `ifStmt         → "if" "(" expression ")" statement ( "else" statement )? ;`
+#[derive(derive_new::new)]
 pub struct IfStmt {
     pub condition: Expression,
     pub then_branch: Box<Statement>,
@@ -70,8 +94,18 @@ pub struct IfStmt {
 /// A print statement in the AST.
 ///
 /// `printStmt      → "print" exprStmt ;`
+#[derive(derive_new::new)]
 pub struct PrintStmt {
     pub expr_stmt: ExprStmt,
+    #[allow(unused)]
+    pub span: Span,
+}
+
+/// A return statement in the AST.
+///
+/// `returnStmt     → "return" expression? ";" ;`
+pub struct ReturnStmt {
+    pub value: Option<Expression>, // Returns nil if no expression is provided.
     #[allow(unused)]
     pub span: Span,
 }
@@ -79,6 +113,7 @@ pub struct PrintStmt {
 /// A while statement in the AST.
 ///
 /// `whileStmt      → "while" "(" expression ")" statement ;`
+#[derive(derive_new::new)]
 pub struct WhileStmt {
     pub condition: Expression,
     pub body: Box<Statement>,
@@ -123,17 +158,25 @@ pub enum ExpressionEnum {
     Comparison(Operator, Box<Expression>, Box<Expression>),
     Equality(Operator, Box<Expression>, Box<Expression>),
     Logical(Operator, Box<Expression>, Box<Expression>),
-    Assignment(Primary, Box<Expression>),
-    // where Primary is the Identifier on the LHS
+    Assignment(Primary, Box<Expression>), // where Primary is the Identifier on the LHS
+    Call(Box<Expression>, Arguments),     // Callee, Arguments
+}
+
+/// A list of arguments in a function call, along with the source code span for error reporting purposes.
+pub struct Arguments {
+    pub args: Vec<Expression>,
+    pub span: Span,
 }
 
 /// An expression in the AST along with its source code span, for error reporting purposes.
+#[derive(derive_new::new)]
 pub struct Expression {
     pub expr: ExpressionEnum,
     pub span: Span,
 }
 
 /// A primary expression in the AST along with its source code span, for error reporting purposes.
+#[derive(derive_new::new)]
 pub struct Primary {
     pub p: PrimaryEnum,
     pub span: Span,
@@ -150,9 +193,37 @@ pub enum PrimaryEnum {
 pub enum Literal {
     Number(f64),
     String(String),
+    Callable(Callable),
     True,
     False,
     Nil,
+}
+
+/// A user-defined callable value in the AST.  Note that built-in functions are
+/// not represented as `Callable`s, since they don't need to be defined before being called.
+#[derive(Clone, derive_new::new)]
+pub struct Callable {
+    pub decl: FunDecl,
+    /// The environment captured at the function's definition site (its closure).
+    pub closure: EnvRc,
+}
+
+impl PartialEq for Callable {
+    fn eq(&self, other: &Self) -> bool {
+        // Are self and other the same object in memory?
+        std::ptr::eq(self, other)
+    }
+}
+
+impl Clone for FunDecl {
+    fn clone(&self) -> Self {
+        FunDecl {
+            name: self.name.clone(),
+            params: self.params.clone(),
+            body: Rc::clone(&self.body),
+            span: self.span.clone(),
+        }
+    }
 }
 
 pub struct Operator {

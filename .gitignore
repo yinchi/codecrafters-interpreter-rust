@@ -11,3 +11,4 @@ target/
 
 # My files
 test.lox
+*.log

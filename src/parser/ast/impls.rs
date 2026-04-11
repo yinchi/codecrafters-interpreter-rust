@@ -2,87 +2,11 @@ use std::fmt::{Debug, Display};
 
 use super::*;
 
-impl Program {
-    pub fn new(declarations: Vec<Declaration>, span: Span) -> Self {
-        Self { declarations, span }
-    }
-}
-
-impl VarDecl {
-    pub fn new(name: String, initializer: Option<Expression>, span: Span) -> Self {
-        Self {
-            name,
-            initializer,
-            span,
-        }
-    }
-}
-
-impl PrintStmt {
-    pub fn new(expr_stmt: ExprStmt, span: Span) -> Self {
-        Self { expr_stmt, span }
-    }
-}
-
-impl ExprStmt {
-    pub fn new(expr: Expression, span: Span) -> Self {
-        Self { expr, span }
-    }
-}
-
-impl IfStmt {
-    pub fn new(
-        condition: Expression,
-        then_branch: Box<Statement>,
-        else_branch: Option<Box<Statement>>,
-        span: Span,
-        indent_depth: usize,
-    ) -> Self {
-        Self {
-            condition,
-            then_branch,
-            else_branch,
-            span,
-            indent_depth,
-        }
-    }
-}
-
-impl WhileStmt {
-    pub fn new(
-        condition: Expression,
-        body: Box<Statement>,
-        span: Span,
-        indent_depth: usize,
-    ) -> Self {
-        Self {
-            condition,
-            body,
-            span,
-            indent_depth,
-        }
-    }
-}
-
-impl Expression {
-    pub fn new(expr: ExpressionEnum, span: Span) -> Self {
-        Self { expr, span }
-    }
-}
-
-impl Primary {
-    pub fn new(primary: PrimaryEnum, span: Span) -> Self {
-        Self { p: primary, span }
-    }
-}
-
 impl From<Literal> for PrimaryEnum {
     fn from(l: Literal) -> Self {
         PrimaryEnum::Literal(l)
     }
 }
-
-// From PrimaryEnum to Primary requires a span, so we need an explict new().
 
 impl From<Primary> for ExpressionEnum {
     fn from(p: Primary) -> Self {
@@ -120,6 +44,11 @@ impl From<ExpressionEnum> for Expression {
             ExpressionEnum::Assignment(name, value) => {
                 Span::new(name.span.start.clone(), value.span.end.clone())
             }
+
+            // Full span is `<callee>(<arg1>, <arg2>, ...)`
+            ExpressionEnum::Call(callee, args) => {
+                Span::new(callee.span.start.clone(), args.span.end.clone())
+            }
         };
         Expression::new(e_enum, span)
     }
@@ -143,6 +72,7 @@ impl Display for Literal {
             Literal::True => write!(f, "true"),
             Literal::False => write!(f, "false"),
             Literal::Nil => write!(f, "nil"),
+            Literal::Callable(callable) => write!(f, "<fn {}>", callable.decl.name),
         }
     }
 }
@@ -155,6 +85,7 @@ impl Clone for Literal {
             Literal::True => Literal::True,
             Literal::False => Literal::False,
             Literal::Nil => Literal::Nil,
+            Literal::Callable(callable) => Literal::Callable(callable.clone()),
         }
     }
 }
@@ -186,6 +117,9 @@ impl Debug for Program {
 impl Debug for Declaration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Declaration::FunDecl(fun_decl, indent_depth) => {
+                write!(f, "{}{:?}", " ".repeat(2 * indent_depth), fun_decl)
+            }
             Declaration::VarDecl(var_decl, indent_depth) => {
                 write!(f, "{}{:?}", " ".repeat(2 * indent_depth), var_decl)
             }
@@ -193,6 +127,13 @@ impl Debug for Declaration {
                 write!(f, "{}{:?}", " ".repeat(2 * indent_depth), stmt)
             }
         }
+    }
+}
+
+impl Debug for FunDecl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let params_str = self.params.join(" ");
+        write!(f, "(fn! {} ({}) {:?})", self.name, params_str, self.body)
     }
 }
 
@@ -212,6 +153,7 @@ impl Debug for Statement {
             // Just print the inner expression.
             Statement::ExprStmt(expr_stmt) => write!(f, "{:?}", expr_stmt),
             Statement::PrintStmt(print_stmt) => write!(f, "{:?}", print_stmt),
+            Statement::ReturnStmt(return_stmt) => write!(f, "{:?}", return_stmt),
 
             // The cases below may involve blocks (possibly multiple lines), so put each
             // child on a new line and increase indentation by 2. For example:
@@ -258,7 +200,9 @@ impl Debug for Statement {
                 // determine how much to indent the closing parenthesis.
                 if let Some(first_decl) = decls.first() {
                     let inner_depth = match first_decl {
-                        Declaration::VarDecl(_, d) | Declaration::Statement(_, d) => *d,
+                        Declaration::VarDecl(_, d)
+                        | Declaration::Statement(_, d)
+                        | Declaration::FunDecl(_, d) => *d,
                     };
                     result.push_str(&format!(
                         "\n{})",
@@ -277,6 +221,15 @@ impl Debug for Statement {
 impl Debug for PrintStmt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "(print {:?})", self.expr_stmt)
+    }
+}
+
+impl Debug for ReturnStmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.value {
+            Some(expr) => write!(f, "(return {:?})", expr),
+            None => write!(f, "(return)"),
+        }
     }
 }
 
@@ -305,6 +258,14 @@ impl Debug for ExpressionEnum {
                 write!(f, "({:?} {:?} {:?})", op, left, right)
             }
             ExpressionEnum::Assignment(name, value) => write!(f, "(set! {:?} {:?})", name, value),
+            ExpressionEnum::Call(callee, args) => {
+                let mut result = format!("({:?}", callee);
+                for arg in &args.args {
+                    result.push_str(&format!(" {:?}", arg));
+                }
+                result.push(')');
+                write!(f, "{}", result)
+            }
         }
     }
 }
@@ -344,6 +305,7 @@ impl Debug for Literal {
             Literal::True => write!(f, "true"),
             Literal::False => write!(f, "false"),
             Literal::Nil => write!(f, "nil"),
+            Literal::Callable(callable) => write!(f, "<fn {}>", callable.decl.name),
         }
     }
 }

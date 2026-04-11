@@ -217,9 +217,9 @@ impl Tokenizer {
                     _ => {
                         self.push(curr_token, curr_lexeme, "null".into());
                         // Re-process the current character in the Default state.
-                        // Decrement first to fix double-firing of `curr_pos += 1`.
-                        self.curr_pos -= 1;
+                        // Decrement after to fix double-firing of `curr_pos += 1`.
                         self.handle_char(c);
+                        self.curr_pos -= 1;
                     }
                 }
             }
@@ -231,9 +231,9 @@ impl Tokenizer {
                     _ => {
                         self.push("SLASH".into(), "/".into(), "null".into());
                         // Re-process the current character in the Default state.
-                        // Decrement first to fix double-firing of `curr_pos += 1`.
-                        self.curr_pos -= 1;
+                        // Decrement after to fix double-firing of `curr_pos += 1`.
                         self.handle_char(c);
+                        self.curr_pos -= 1;
                     }
                 }
             }
@@ -268,9 +268,9 @@ impl Tokenizer {
 
                         self.push("NUMBER".into(), current_str.clone(), format_num(value));
                         // Re-process the current character in the Default state.
-                        // Decrement first to fix double-firing of `curr_pos += 1`.
-                        self.curr_pos -= 1;
+                        // Decrement after to fix double-firing of `curr_pos += 1`.
                         self.handle_char(c);
+                        self.curr_pos -= 1;
                     }
                 }
             }
@@ -287,9 +287,9 @@ impl Tokenizer {
                         let value = current_str.parse::<f64>().unwrap();
                         self.push("NUMBER".into(), current_str.clone(), format_num(value));
                         // Re-process the current character in the Default state.
-                        // Decrement first to fix double-firing of `curr_pos += 1`.
-                        self.curr_pos -= 1;
+                        // Decrement after to fix double-firing of `curr_pos += 1`.
                         self.handle_char(c);
+                        self.curr_pos -= 1;
                     }
                 }
             }
@@ -311,9 +311,9 @@ impl Tokenizer {
                         };
                         self.push(token_type, current_str.clone(), "null".into());
                         // Re-process the current character in the Default state.
-                        // Decrement first to fix double-firing of `curr_pos += 1`.
-                        self.curr_pos -= 1;
+                        // Decrement after to fix double-firing of `curr_pos += 1`.
                         self.handle_char(c);
+                        self.curr_pos -= 1;
                     }
                 }
             }

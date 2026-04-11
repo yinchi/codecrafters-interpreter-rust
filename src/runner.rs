@@ -1,72 +1,39 @@
 //! Module for running a Lox program.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::evaluator::{RuntimeError, evaluate, is_truthy};
-use crate::parser::{ASTree, Declaration, Literal, Statement};
+use crate::builtins::BuiltIns;
+use crate::environment::{EnvRc, new_env_rc};
+use crate::evaluator::{RunError, evaluate, is_truthy};
+use crate::parser::{ASTree, Callable, Declaration, Literal, Statement};
 
 /// Program state
-struct ProgramState {
-    /// The global environment for the program.
-    env: Environment,
-}
-
-pub struct Environment {
-    /// A mapping from variable names to their values (Lox literals).
-    pub vars: HashMap<String, Literal>,
-    /// The parent environment, if any (for nested scopes).
-    pub parent: Option<Rc<RefCell<Environment>>>,
+pub struct ProgramState {
+    /// The current environment (lexically scoped, Rc-shared so closures can capture it).
+    pub env: EnvRc,
+    /// Built-in functions and constants.
+    pub builtins: Rc<BuiltIns>,
 }
 
 impl ProgramState {
     pub fn new() -> Self {
         ProgramState {
-            env: Environment::new(),
+            env: new_env_rc(None),
+            builtins: Rc::new(BuiltIns::new()),
         }
-    }
-}
-
-impl Environment {
-    pub fn new() -> Self {
-        Environment {
-            vars: HashMap::new(),
-            parent: None,
-        }
-    }
-
-    /// Look up a variable by walking the environment chain.
-    pub fn get_var(&self, name: &str) -> Option<Literal> {
-        if let Some(val) = self.vars.get(name) {
-            return Some(val.clone());
-        }
-        self.parent.as_ref()?.borrow().get_var(name)
-    }
-
-    /// Assign to an existing variable somewhere in the environment chain.
-    /// Returns `true` if the variable was found and updated, `false` if undeclared.
-    pub fn set_var(&mut self, name: &str, val: Literal) -> bool {
-        if self.vars.contains_key(name) {
-            self.vars.insert(name.to_string(), val);
-            return true;
-        }
-        if let Some(parent) = &self.parent {
-            return parent.borrow_mut().set_var(name, val);
-        }
-        false
     }
 }
 
 /// Runs a Lox program represented as an AST.
-pub fn run_program(ast: &ASTree) -> Result<(), RuntimeError> {
+pub fn run_program(ast: &ASTree) -> Result<Literal, RunError> {
     match ast {
         ASTree::Program(program) => {
             let mut state = ProgramState::new();
+            let mut last_val = Literal::Nil;
             for decl in &program.declarations {
-                run_decl(decl, &mut state)?;
+                last_val = run_decl(decl, &mut state)?;
             }
-            Ok(())
+            Ok(last_val)
         }
         ASTree::Declaration(_) => {
             // A program is any number of declarations followed by EOF, so if we see a single
@@ -83,69 +50,112 @@ pub fn run_program(ast: &ASTree) -> Result<(), RuntimeError> {
 }
 
 /// Runs a single declaration, updating the program state as needed.
-fn run_decl(decl: &Declaration, state: &mut ProgramState) -> Result<(), RuntimeError> {
+fn run_decl(decl: &Declaration, state: &mut ProgramState) -> Result<Literal, RunError> {
     match decl {
         Declaration::VarDecl(var_decl, _) => {
             // Handle variable declaration, defaulting to nil if no initializer present.
-            // We don't need to do anything special with the indent depth (_),
-            // as `state.env` will already be the correct environment for this statement.
             let val = if let Some(initializer) = &var_decl.initializer {
-                evaluate(initializer, &mut state.env)?
+                evaluate(initializer, &state.env, &state.builtins)?
             } else {
                 Literal::Nil
             };
-            state.env.vars.insert(var_decl.name.clone(), val);
+            state
+                .env
+                .borrow_mut()
+                .vars
+                .insert(var_decl.name.clone(), val.clone());
+            // Return the value of the variable declaration, which is the value
+            // of the initializer if present, or nil otherwise.
+            Ok(val)
         }
-        Declaration::Statement(stmt, _) => {
-            // We don't need to do anything special with the indent depth (_),
-            // as `state.env` will already be the correct environment for this statement.
-            run_stmt(stmt, state)?;
+        Declaration::FunDecl(fun_decl, _) => {
+            // Capture the current environment as the closure for lexical scoping.
+            let closure = Rc::clone(&state.env);
+            let callable = Literal::Callable(Callable::new(fun_decl.clone(), closure));
+            state
+                .env
+                .borrow_mut()
+                .vars
+                .insert(fun_decl.name.clone(), callable.clone());
+            Ok(callable)
         }
+        Declaration::Statement(stmt, _) => run_stmt(stmt, state),
     }
-    Ok(())
 }
 
-fn run_stmt(stmt: &Statement, state: &mut ProgramState) -> Result<(), RuntimeError> {
+pub fn run_stmt(stmt: &Statement, state: &mut ProgramState) -> Result<Literal, RunError> {
     match stmt {
         Statement::ExprStmt(expr_stmt) => {
-            // Evaluate the expression and discard the result.
-            // Ensures side effects are applied, even if the result is not used.
-            let _ = evaluate(&expr_stmt.expr, &mut state.env)?;
+            let ret = evaluate(&expr_stmt.expr, &state.env, &state.builtins)?;
+            Ok(ret)
         }
         Statement::PrintStmt(print_stmt) => {
-            let val = evaluate(&print_stmt.expr_stmt.expr, &mut state.env)?;
+            let val = evaluate(&print_stmt.expr_stmt.expr, &state.env, &state.builtins)?;
             println!("{}", val);
+            // The value of a print statement is always nil.
+            // (Check if `return print val;` works in the Lox spec to confirm this.)
+            Ok(Literal::Nil)
+        }
+        Statement::ReturnStmt(return_stmt) => {
+            let val = if let Some(expr) = &return_stmt.value {
+                // `return val;` case
+                evaluate(expr, &state.env, &state.builtins)?
+            } else {
+                // `return;` case, which returns nil.
+                Literal::Nil
+            };
+            Err(RunError::ReturnSignal(val))
         }
         Statement::IfStmt(if_stmt) => {
-            let condition = evaluate(&if_stmt.condition, &mut state.env)?;
+            let condition = evaluate(&if_stmt.condition, &state.env, &state.builtins)?;
             if is_truthy(&condition) {
-                run_stmt(&if_stmt.then_branch, state)?;
+                // If the condition is truthy, run the then branch and return its value.
+                run_stmt(&if_stmt.then_branch, state)
             } else if let Some(else_branch) = &if_stmt.else_branch {
-                run_stmt(else_branch, state)?;
+                // Else if the condition is falsy and we have an else branch,
+                // run the else branch and return its value.
+                run_stmt(else_branch, state)
+            } else {
+                // Else if the condition is falsy and we don't have an else branch,
+                // so no branch gets executed and the value of the if statement is nil.
+                Ok(Literal::Nil)
             }
         }
         Statement::WhileStmt(while_stmt) => {
-            while is_truthy(&evaluate(&while_stmt.condition, &mut state.env)?) {
+            while is_truthy(&evaluate(
+                &while_stmt.condition,
+                &state.env,
+                &state.builtins,
+            )?) {
                 run_stmt(&while_stmt.body, state)?;
             }
+            Ok(Literal::Nil)
         }
-        Statement::Block(decls) => {
-            // Swap out the current env and make it the parent of a new child env.
-            // The child env starts empty, and will be populated with any declarations in the block.
-            // `get_var` and `set_var` will automatically walk up to the parent env if a variable
-            // is not found in the child env.
-            let parent_env = std::mem::replace(&mut state.env, Environment::new());
-            state.env.parent = Some(Rc::new(RefCell::new(parent_env)));
+        Statement::Block(decls) => run_block(decls, state),
+    }
+}
 
-            // Run each declaration in the block using the child environment.
-            for decl in decls {
-                run_decl(decl, state)?;
+fn run_block(decls: &[Declaration], state: &mut ProgramState) -> Result<Literal, RunError> {
+    // Create a new child environment with the current env as its parent.
+    let child_env = new_env_rc(Some(&state.env));
+    let saved_env = std::mem::replace(&mut state.env, child_env);
+
+    // Run each declaration in the block, stopping early on error or return signal.
+    let mut result: Result<Literal, RunError> = Ok(Literal::Nil);
+    for decl in decls {
+        match run_decl(decl, state) {
+            Ok(val) => {
+                result = Ok(val);
             }
-
-            // Restore the parent environment when the block exits.
-            let parent_rc = state.env.parent.take().unwrap();
-            state.env = Rc::try_unwrap(parent_rc).ok().unwrap().into_inner();
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
         }
     }
-    Ok(())
+
+    // Restore the parent environment before returning (even on error/signal).
+    state.env = saved_env;
+
+    result
 }

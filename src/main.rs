@@ -1,3 +1,5 @@
+mod builtins;
+mod environment;
 mod evaluator;
 mod format;
 mod parser;
@@ -6,10 +8,12 @@ mod tokenizer;
 
 use std::env;
 use std::fs;
+use std::rc::Rc;
 
-use evaluator::{evaluate, handle_runtime_error};
+use environment::new_env_rc;
+use evaluator::{RunError, evaluate, handle_runtime_error};
 use parser::parse;
-use runner::{Environment, run_program};
+use runner::run_program;
 use tokenizer::tokenize;
 
 use crate::parser::ASTree;
@@ -83,8 +87,9 @@ fn main() {
                     // Else raise an error.  In evaluation mode, we don't have any preceding
                     // variable declarations, so use an empty environment for evaluation.
                     if let ASTree::Expr(expr) = ast {
-                        let mut env = Environment::new();
-                        match evaluate(&expr, &mut env) {
+                        let env = new_env_rc(None);
+                        let builtins = Rc::new(builtins::BuiltIns::new());
+                        match evaluate(&expr, &env, &builtins) {
                             Ok(value) => println!("{}", value),
                             Err(e) => {
                                 handle_runtime_error(&e, file_contents.as_str());
@@ -116,10 +121,16 @@ fn main() {
 
             match parse(&tokens) {
                 Ok(ast) => {
-                    if let Err(e) = run_program(&ast) {
-                        handle_runtime_error(&e, file_contents.as_str());
-                        std::process::exit(EXIT_CODE_RUNTIME_ERROR);
+                    match run_program(&ast) {
+                        Ok(_) | Err(RunError::ReturnSignal(_)) => {
+                            // If the program returns a value, ignore it and exit with code 0.
+                        }
+                        Err(RunError::RuntimeError(e)) => {
+                            handle_runtime_error(&e, file_contents.as_str());
+                            std::process::exit(EXIT_CODE_RUNTIME_ERROR);
+                        }
                     }
+                    // If Ok or ReturnSignal, the program has finished normally.
                 }
                 Err(e) => {
                     eprintln!("{}", e);
