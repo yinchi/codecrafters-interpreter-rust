@@ -3,20 +3,20 @@ mod environment;
 mod evaluator;
 mod format;
 mod parser;
+mod resolver;
 mod runner;
 mod tokenizer;
 
 use std::env;
 use std::fs;
-use std::rc::Rc;
 
-use environment::new_env_rc;
 use evaluator::{RunError, evaluate, handle_runtime_error};
 use parser::parse;
-use runner::run_program;
+use runner::{ProgramState, run_program};
 use tokenizer::tokenize;
 
 use crate::parser::ASTree;
+use crate::resolver::LocalsType;
 
 const EXIT_CODE_SYNTAX_ERROR: i32 = 65;
 const EXIT_CODE_RUNTIME_ERROR: i32 = 70;
@@ -28,12 +28,12 @@ fn main() {
         return;
     }
 
-    let command = &args[1];
-    let filename = &args[2];
+    let command: &String = &args[1];
+    let filename: &String = &args[2];
 
     match command.as_str() {
         "tokenize" => {
-            let file_contents = fs::read_to_string(filename).unwrap_or_else(|_| {
+            let file_contents: String = fs::read_to_string(filename).unwrap_or_else(|_| {
                 eprintln!("Failed to read file {}", filename);
                 String::new()
             });
@@ -70,7 +70,7 @@ fn main() {
             }
         }
         "evaluate" => {
-            let file_contents = fs::read_to_string(filename).unwrap_or_else(|_| {
+            let file_contents: String = fs::read_to_string(filename).unwrap_or_else(|_| {
                 eprintln!("Failed to read file {}", filename);
                 String::new()
             });
@@ -87,9 +87,8 @@ fn main() {
                     // Else raise an error.  In evaluation mode, we don't have any preceding
                     // variable declarations, so use an empty environment for evaluation.
                     if let ASTree::Expr(expr) = ast {
-                        let env = new_env_rc(None);
-                        let builtins = Rc::new(builtins::BuiltIns::new());
-                        match evaluate(&expr, &env, &builtins) {
+                        let state = ProgramState::new();
+                        match evaluate(&expr, &state.env, &LocalsType::new()) {
                             Ok(value) => println!("{}", value),
                             Err(e) => {
                                 handle_runtime_error(&e, file_contents.as_str());
@@ -108,7 +107,7 @@ fn main() {
             }
         }
         "run" => {
-            let file_contents = fs::read_to_string(filename).unwrap_or_else(|_| {
+            let file_contents: String = fs::read_to_string(filename).unwrap_or_else(|_| {
                 eprintln!("Failed to read file {}", filename);
                 String::new()
             });

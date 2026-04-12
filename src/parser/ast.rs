@@ -1,14 +1,11 @@
 //! Abstract Syntax Tree (AST) definitions for the Lox interpreter.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::span::Span;
-use crate::environment::Environment;
+use super::span::{Location, Span};
+use crate::environment::EnvRc;
 
 pub mod impls;
-
-type EnvRc = Rc<RefCell<Environment>>;
 
 /// A Lox program (top-level AST node)
 ///
@@ -32,10 +29,11 @@ pub enum Declaration {
 /// A function declaration in the AST
 ///
 /// funDecl         → "fun" IDENTIFIER "(" parameters? ")" block ;
-#[derive(derive_new::new)]
+#[derive(Clone, derive_new::new)]
 pub struct FunDecl {
     pub name: String,
-    pub params: Vec<String>,
+    /// Each element is `(parameter_name, source_location)`.
+    pub params: Vec<(String, Location)>,
     pub body: Rc<Statement>, // the block statement representing the function body
     #[allow(unused)]
     pub span: Span,
@@ -47,6 +45,8 @@ pub struct FunDecl {
 #[derive(derive_new::new)]
 pub struct VarDecl {
     pub name: String,
+    /// Source location of the variable name token (used for error messages).
+    pub name_loc: Location,
     pub initializer: Option<Expression>,
     #[allow(unused)]
     pub span: Span,
@@ -185,44 +185,43 @@ pub struct Primary {
 pub enum PrimaryEnum {
     Literal(Literal),
     Grouping(Box<Expression>),
-    Identifier(String),
+    Identifier(String, usize), // usize is the identifier ID (index of the token in the tokenize() output)
 }
 
 /// A literal value in the AST, which can be a number, string, boolean, or nil.
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Literal {
     Number(f64),
     String(String),
-    Callable(Callable),
+    UserCallable(UserCallable),
+    NativeCallable(NativeCallable),
     True,
     False,
     Nil,
 }
 
-/// A user-defined callable value in the AST.  Note that built-in functions are
-/// not represented as `Callable`s, since they don't need to be defined before being called.
+/// A user-defined callable value in the AST.
 #[derive(Clone, derive_new::new)]
-pub struct Callable {
-    pub decl: FunDecl,
+pub struct UserCallable {
+    /// The function declaration for this callable.
+    /// We use an Rc here to allow multiple copies of the same function declaration,
+    /// e.g. to allow patterns like `fun foo() {} print foo == foo;` to work as expected.
+    pub decl: Rc<FunDecl>,
     /// The environment captured at the function's definition site (its closure).
     pub closure: EnvRc,
 }
 
-impl PartialEq for Callable {
-    fn eq(&self, other: &Self) -> bool {
-        // Are self and other the same object in memory?
-        std::ptr::eq(self, other)
-    }
+/// A native (built-in) callable value.
+#[derive(Clone)]
+pub struct NativeCallable {
+    pub name: &'static str,
+    pub arity: usize,
+    pub func: fn(&[Literal]) -> Result<Literal, String>,
 }
 
-impl Clone for FunDecl {
-    fn clone(&self) -> Self {
-        FunDecl {
-            name: self.name.clone(),
-            params: self.params.clone(),
-            body: Rc::clone(&self.body),
-            span: self.span.clone(),
-        }
+impl PartialEq for NativeCallable {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
     }
 }
 

@@ -29,28 +29,28 @@ impl Debug for ASTree {
 
 /// Parses a primary expression, i.e. a literal or a parenthesized expression (group).
 fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
-    let token = tokens
+    let token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     match token.token_type.as_str() {
         "NUMBER" => {
-            let n = token.literal.parse::<f64>().map_err(|_| {
+            let n: f64 = token.literal.parse::<f64>().map_err(|_| {
                 format!(
                     "[line {}:{}] Syntax error: invalid number literal '{}'.",
                     token.line, token.col, token.literal
                 )
             })?;
             *pos += 1;
-            let span = Span::new(
+            let span: Span = Span::new(
                 Location::new(token.line, token.col),
                 Location::new(token.line, token.col + token.lexeme.len()),
             );
             Ok(Primary::new(PrimaryEnum::Literal(Literal::Number(n)), span.clone()).into())
         }
         "STRING" => {
-            let s = token.literal.clone();
+            let s: String = token.literal.clone();
             *pos += 1;
-            let span = Span::new(
+            let span: Span = Span::new(
                 Location::new(token.line, token.col),
                 Location::new(token.line, token.col + token.lexeme.len()),
             );
@@ -58,7 +58,7 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<Expression, String
         }
         "TRUE" => {
             *pos += 1;
-            let span = Span::new(
+            let span: Span = Span::new(
                 Location::new(token.line, token.col),
                 Location::new(token.line, token.col + token.lexeme.len()),
             );
@@ -66,7 +66,7 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<Expression, String
         }
         "FALSE" => {
             *pos += 1;
-            let span = Span::new(
+            let span: Span = Span::new(
                 Location::new(token.line, token.col),
                 Location::new(token.line, token.col + token.lexeme.len()),
             );
@@ -74,7 +74,7 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<Expression, String
         }
         "NIL" => {
             *pos += 1;
-            let span = Span::new(
+            let span: Span = Span::new(
                 Location::new(token.line, token.col),
                 Location::new(token.line, token.col + token.lexeme.len()),
             );
@@ -85,10 +85,14 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<Expression, String
             *pos += 1; // consume '('
             // Go back to the top-level parse function to parse the expression inside the
             // parentheses.
-            let expr = parse_expression(tokens, pos)?;
-            let next_token = tokens
-                .get(*pos)
-                .ok_or_else(|| "Syntax error: Unexpected end of input.".to_string())?;
+            let expr: Expression = parse_expression(tokens, pos)?;
+            let next_token: &Token = tokens.get(*pos).ok_or_else(|| {
+                let last = &tokens[(*pos).saturating_sub(1)];
+                format!(
+                    "[line {}:{}] Syntax error: expected ')' after expression, but found EOF.",
+                    last.line, last.col
+                )
+            })?;
             if next_token.token_type != "RIGHT_PAREN" {
                 return Err(format!(
                     "[line {}:{}] Syntax error: expected ')' after expression.",
@@ -97,20 +101,21 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<Expression, String
             }
             *pos += 1; // consume ')'
             // Span covers from '(' to ')' inclusive.
-            let span = Span::new(
+            let span: Span = Span::new(
                 Location::new(token.line, token.col),
                 Location::new(next_token.line, next_token.col + next_token.lexeme.len()),
             );
             Ok(Primary::new(PrimaryEnum::Grouping(Box::new(expr)), span).into())
         }
         "IDENTIFIER" => {
-            let name = token.lexeme.clone();
+            let name: String = token.lexeme.clone();
+            let curr_pos: usize = *pos; // capture the current position for the identifier ID
             *pos += 1;
             let span = Span::new(
                 Location::new(token.line, token.col),
                 Location::new(token.line, token.col + token.lexeme.len()),
             );
-            Ok(Primary::new(PrimaryEnum::Identifier(name), span.clone()).into())
+            Ok(Primary::new(PrimaryEnum::Identifier(name, curr_pos), span.clone()).into())
         }
         _ => Err(format!(
             "[line {}:{}] Syntax error: unexpected token '{}'.",
@@ -123,7 +128,7 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<Expression, String
 ///
 /// `call -> primary ( "(" [ arguments ] ")" )*`
 fn parse_call(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
-    let mut expr = parse_primary(tokens, pos)?;
+    let mut expr: Expression = parse_primary(tokens, pos)?;
 
     // Check for zero or more call suffixes after the primary expression.
     loop {
@@ -133,10 +138,10 @@ fn parse_call(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
             *pos += 1; // consume '('
 
             // Parse arguments if there are any.
-            let args = if let Some(next_token) = tokens.get(*pos)
+            let args: Option<Arguments> = if let Some(next_token) = tokens.get(*pos)
                 && next_token.token_type != "RIGHT_PAREN"
             {
-                let mut args_vec = Vec::new();
+                let mut args_vec: Vec<Expression> = Vec::new();
                 loop {
                     args_vec.push(parse_expression(tokens, pos)?);
                     if let Some(comma_token) = tokens.get(*pos)
@@ -159,7 +164,7 @@ fn parse_call(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
             };
 
             // Check for closing ')'
-            let right_paren_token = tokens
+            let right_paren_token: &Token = tokens
                 .get(*pos)
                 .ok_or_else(|| "Unexpected end of input.".to_string())?;
             if right_paren_token.token_type != "RIGHT_PAREN" {
@@ -170,7 +175,7 @@ fn parse_call(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
             }
             *pos += 1; // consume ')'
 
-            let span = Span::new(
+            let span: Span = Span::new(
                 expr.span.start.clone(),
                 Location::new(
                     right_paren_token.line,
@@ -204,11 +209,11 @@ fn parse_call(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
 ///
 /// `unary -> ( "-" | "!" ) unary | call`
 fn parse_unary(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
-    let token = tokens
+    let token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     if matches!(token.token_type.as_str(), "MINUS" | "BANG") {
-        let op = Operator {
+        let op: Operator = Operator {
             op: token.lexeme.clone(),
             span: Span::new(
                 Location::new(token.line, token.col),
@@ -217,7 +222,7 @@ fn parse_unary(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> 
         };
 
         *pos += 1;
-        let operand = parse_unary(tokens, pos)?;
+        let operand: Expression = parse_unary(tokens, pos)?;
         let span = Span::new(
             Location::new(token.line, token.col),
             Location::new(operand.span.end.line, operand.span.end.col),
@@ -236,12 +241,12 @@ fn parse_unary(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> 
 ///
 /// `factor -> unary ( ( "*" | "/" ) unary )*`
 fn parse_factor(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
-    let mut left = parse_unary(tokens, pos)?;
+    let mut left: Expression = parse_unary(tokens, pos)?;
 
     // Consume factors into `left` until we can't anymore.
     while let Some(token) = tokens.get(*pos) {
         if matches!(token.token_type.as_str(), "STAR" | "SLASH") {
-            let op = Operator {
+            let op: Operator = Operator {
                 op: token.lexeme.clone(),
                 span: Span::new(
                     Location::new(token.line, token.col),
@@ -250,8 +255,8 @@ fn parse_factor(tokens: &[Token], pos: &mut usize) -> Result<Expression, String>
             };
 
             *pos += 1;
-            let right = parse_unary(tokens, pos)?;
-            let span = Span::new(
+            let right: Expression = parse_unary(tokens, pos)?;
+            let span: Span = Span::new(
                 Location::new(left.span.start.line, left.span.start.col),
                 Location::new(right.span.end.line, right.span.end.col),
             );
@@ -273,12 +278,12 @@ fn parse_factor(tokens: &[Token], pos: &mut usize) -> Result<Expression, String>
 ///
 /// `term -> factor ( ( "+" | "-" ) factor )*`
 fn parse_term(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
-    let mut left = parse_factor(tokens, pos)?;
+    let mut left: Expression = parse_factor(tokens, pos)?;
 
     // Consume terms into `left` until we can't anymore.
     while let Some(token) = tokens.get(*pos) {
         if matches!(token.token_type.as_str(), "PLUS" | "MINUS") {
-            let op = Operator {
+            let op: Operator = Operator {
                 op: token.lexeme.clone(),
                 span: Span::new(
                     Location::new(token.line, token.col),
@@ -287,8 +292,8 @@ fn parse_term(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
             };
 
             *pos += 1;
-            let right = parse_factor(tokens, pos)?;
-            let span = Span::new(
+            let right: Expression = parse_factor(tokens, pos)?;
+            let span: Span = Span::new(
                 Location::new(left.span.start.line, left.span.start.col),
                 Location::new(right.span.end.line, right.span.end.col),
             );
@@ -310,7 +315,7 @@ fn parse_term(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
 ///
 /// `comparison -> term ( ( ">" | ">=" | "<" | "<=" ) term )*`
 fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
-    let mut left = parse_term(tokens, pos)?;
+    let mut left: Expression = parse_term(tokens, pos)?;
 
     // Consume comparisons into `left` until we can't anymore.
     while let Some(token) = tokens.get(*pos) {
@@ -318,7 +323,7 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expression, Str
             token.token_type.as_str(),
             "GREATER" | "GREATER_EQUAL" | "LESS" | "LESS_EQUAL"
         ) {
-            let op = Operator {
+            let op: Operator = Operator {
                 op: token.lexeme.clone(),
                 span: Span::new(
                     Location::new(token.line, token.col),
@@ -327,8 +332,8 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expression, Str
             };
 
             *pos += 1;
-            let right = parse_term(tokens, pos)?;
-            let span = Span::new(
+            let right: Expression = parse_term(tokens, pos)?;
+            let span: Span = Span::new(
                 Location::new(left.span.start.line, left.span.start.col),
                 Location::new(right.span.end.line, right.span.end.col),
             );
@@ -350,12 +355,12 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expression, Str
 ///
 /// `equality -> comparison ( ( "==" | "!=" ) comparison )*`
 fn parse_equality(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
-    let mut left = parse_comparison(tokens, pos)?;
+    let mut left: Expression = parse_comparison(tokens, pos)?;
 
     // Consume equality operators into `left` until we can't anymore.
     while let Some(token) = tokens.get(*pos) {
         if matches!(token.token_type.as_str(), "EQUAL_EQUAL" | "BANG_EQUAL") {
-            let op = Operator {
+            let op: Operator = Operator {
                 op: token.lexeme.clone(),
                 span: Span::new(
                     Location::new(token.line, token.col),
@@ -364,8 +369,8 @@ fn parse_equality(tokens: &[Token], pos: &mut usize) -> Result<Expression, Strin
             };
 
             *pos += 1;
-            let right = parse_comparison(tokens, pos)?;
-            let span = Span::new(
+            let right: Expression = parse_comparison(tokens, pos)?;
+            let span: Span = Span::new(
                 Location::new(left.span.start.line, left.span.start.col),
                 Location::new(right.span.end.line, right.span.end.col),
             );
@@ -386,12 +391,12 @@ fn parse_equality(tokens: &[Token], pos: &mut usize) -> Result<Expression, Strin
 ///
 /// `logic_and -> equality ( "and" equality )*`
 fn parse_logic_and(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
-    let mut left = parse_equality(tokens, pos)?;
+    let mut left: Expression = parse_equality(tokens, pos)?;
 
     // Consume "and" operators into `left` until we can't anymore.
     while let Some(token) = tokens.get(*pos) {
         if token.token_type == "AND" {
-            let op = Operator {
+            let op: Operator = Operator {
                 op: token.lexeme.clone(),
                 span: Span::new(
                     Location::new(token.line, token.col),
@@ -400,8 +405,8 @@ fn parse_logic_and(tokens: &[Token], pos: &mut usize) -> Result<Expression, Stri
             };
 
             *pos += 1;
-            let right = parse_equality(tokens, pos)?;
-            let span = Span::new(
+            let right: Expression = parse_equality(tokens, pos)?;
+            let span: Span = Span::new(
                 Location::new(left.span.start.line, left.span.start.col),
                 Location::new(right.span.end.line, right.span.end.col),
             );
@@ -421,12 +426,12 @@ fn parse_logic_and(tokens: &[Token], pos: &mut usize) -> Result<Expression, Stri
 ///
 /// `logic_or -> logic_and ( "or" logic_and )*`
 fn parse_logic_or(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
-    let mut left = parse_logic_and(tokens, pos)?;
+    let mut left: Expression = parse_logic_and(tokens, pos)?;
 
     // Consume "or" operators into `left` until we can't anymore.
     while let Some(token) = tokens.get(*pos) {
         if token.token_type == "OR" {
-            let op = Operator {
+            let op: Operator = Operator {
                 op: token.lexeme.clone(),
                 span: Span::new(
                     Location::new(token.line, token.col),
@@ -435,8 +440,8 @@ fn parse_logic_or(tokens: &[Token], pos: &mut usize) -> Result<Expression, Strin
             };
 
             *pos += 1;
-            let right = parse_logic_and(tokens, pos)?;
-            let span = Span::new(
+            let right: Expression = parse_logic_and(tokens, pos)?;
+            let span: Span = Span::new(
                 Location::new(left.span.start.line, left.span.start.col),
                 Location::new(right.span.end.line, right.span.end.col),
             );
@@ -457,7 +462,7 @@ fn parse_logic_or(tokens: &[Token], pos: &mut usize) -> Result<Expression, Strin
 ///
 /// `assignment -> IDENTIFIER "=" assignment | logic_or`
 fn parse_assignment(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
-    let left = parse_logic_or(tokens, pos)?;
+    let left: Expression = parse_logic_or(tokens, pos)?;
 
     if let Some(token) = tokens.get(*pos)
         && token.token_type == "EQUAL"
@@ -467,9 +472,9 @@ fn parse_assignment(tokens: &[Token], pos: &mut usize) -> Result<Expression, Str
 
         // Check that LHS is an identifier.  If it is, build an Assignment expression.
         if let ExpressionEnum::Primary(p) = left.expr
-            && let PrimaryEnum::Identifier(_) = p.p
+            && let PrimaryEnum::Identifier(_, _id) = p.p
         {
-            let span = Span::new(left.span.start.clone(), right.span.end.clone());
+            let span: Span = Span::new(left.span.start.clone(), right.span.end.clone());
             return Ok(Expression::new(
                 ExpressionEnum::Assignment(p, Box::new(right)),
                 span,
@@ -500,7 +505,7 @@ fn parse_expr_stmt(
     pos: &mut usize,
     indent_depth: usize,
 ) -> Result<ASTree, String> {
-    let expr = parse_expression(tokens, pos)?;
+    let expr: Expression = parse_expression(tokens, pos)?;
 
     // Check that the next token is a semicolon, and consume it.
     match tokens.get(*pos) {
@@ -530,18 +535,19 @@ fn parse_print_stmt(
     pos: &mut usize,
     indent_depth: usize,
 ) -> Result<ASTree, String> {
-    let print_token = tokens
+    let print_token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     *pos += 1; // consume 'print'
-    let my_evaluable = parse_expr_stmt(tokens, pos, indent_depth)?;
+
+    let my_evaluable: ASTree = parse_expr_stmt(tokens, pos, indent_depth)?;
     // Check that expr is an expression statement
     if let ASTree::Declaration(Declaration::Statement(
         Statement::ExprStmt(expr_stmt),
         indent_depth,
     )) = my_evaluable
     {
-        let span = Span::new(
+        let span: Span = Span::new(
             Location::new(print_token.line, print_token.col),
             Location::new(expr_stmt.span.end.line, expr_stmt.span.end.col),
         );
@@ -565,13 +571,13 @@ fn parse_return_stmt(
     pos: &mut usize,
     indent_depth: usize,
 ) -> Result<ASTree, String> {
-    let return_token = tokens
+    let return_token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     *pos += 1; // consume 'return'
 
     // Check if the next token is a semicolon, which would mean no return value.
-    let value = if let Some(token) = tokens.get(*pos)
+    let value: Option<Expression> = if let Some(token) = tokens.get(*pos)
         && token.token_type == "SEMICOLON"
     {
         None
@@ -580,7 +586,7 @@ fn parse_return_stmt(
     };
 
     // Check for the semicolon after the optional expression.
-    let semicolon_token = tokens
+    let semicolon_token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     if semicolon_token.token_type != "SEMICOLON" {
@@ -591,7 +597,7 @@ fn parse_return_stmt(
     }
     *pos += 1; // consume ';'
 
-    let span = Span::new(
+    let span: Span = Span::new(
         Location::new(return_token.line, return_token.col),
         Location::new(
             semicolon_token.line,
@@ -609,8 +615,8 @@ fn parse_return_stmt(
 ///
 /// `block → "{" declaration* "}"`
 fn parse_block(tokens: &[Token], pos: &mut usize, indent_depth: usize) -> Result<ASTree, String> {
-    let open_brace_line = tokens[*pos].line;
-    let open_brace_col = tokens[*pos].col;
+    let open_brace_line: usize = tokens[*pos].line;
+    let open_brace_col: usize = tokens[*pos].col;
     *pos += 1; // consume '{'
 
     let mut decls: Vec<Declaration> = Vec::new();
@@ -670,11 +676,11 @@ fn parse_block(tokens: &[Token], pos: &mut usize, indent_depth: usize) -> Result
 ///
 /// `ifStmt         → "if" "(" expression ")" statement ( "else" statement )? ;`
 fn parse_if_stmt(tokens: &[Token], pos: &mut usize, indent_depth: usize) -> Result<ASTree, String> {
-    let if_pos = *pos;
+    let if_pos: usize = *pos;
     *pos += 1; // consume 'if'
 
     // Check for '('
-    let left_paren_token = tokens
+    let left_paren_token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     if left_paren_token.token_type != "LEFT_PAREN" {
@@ -688,7 +694,7 @@ fn parse_if_stmt(tokens: &[Token], pos: &mut usize, indent_depth: usize) -> Resu
     let condition = parse_expression(tokens, pos)?;
 
     // Check for ')'
-    let right_paren_token = tokens
+    let right_paren_token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     if right_paren_token.token_type != "RIGHT_PAREN" {
@@ -699,34 +705,36 @@ fn parse_if_stmt(tokens: &[Token], pos: &mut usize, indent_depth: usize) -> Resu
     }
     *pos += 1; // consume ')'
 
-    let then_branch = Box::new(match parse_statement(tokens, pos, indent_depth + 1)? {
-        ASTree::Declaration(Declaration::Statement(stmt, _)) => stmt,
-        ASTree::Declaration(Declaration::VarDecl(..)) => {
-            return Err(format!(
-                "[line {}:{}] Syntax error: variable declaration not allowed directly inside 'if' statement. Use a block to create an inner scope.",
-                tokens[*pos - 1].line,
-                tokens[*pos - 1].col
-            ));
-        }
-        ASTree::Declaration(Declaration::FunDecl(..)) => {
-            return Err(format!(
-                "[line {}:{}] Syntax error: function declaration not allowed directly inside 'if' statement. Use a block to create an inner scope.",
-                tokens[*pos - 1].line,
-                tokens[*pos - 1].col
-            ));
-        }
-        ASTree::Expr(_) => {
-            return Err(format!(
-                "[line {}:{}] Syntax error: expected statement after if condition.",
-                tokens[*pos - 1].line,
-                tokens[*pos - 1].col
-            ));
-        }
-        ASTree::Program(_) => unreachable!(),
-    });
+    let then_branch: Box<Statement> = Box::new(
+        match parse_statement(tokens, pos, indent_depth + 1)? {
+            ASTree::Declaration(Declaration::Statement(stmt, _)) => stmt,
+            ASTree::Declaration(Declaration::VarDecl(..)) => {
+                return Err(format!(
+                    "[line {}:{}] Syntax error: variable declaration not allowed directly inside 'if' statement. Use a block to create an inner scope.",
+                    tokens[*pos - 1].line,
+                    tokens[*pos - 1].col
+                ));
+            }
+            ASTree::Declaration(Declaration::FunDecl(..)) => {
+                return Err(format!(
+                    "[line {}:{}] Syntax error: function declaration not allowed directly inside 'if' statement. Use a block to create an inner scope.",
+                    tokens[*pos - 1].line,
+                    tokens[*pos - 1].col
+                ));
+            }
+            ASTree::Expr(_) => {
+                return Err(format!(
+                    "[line {}:{}] Syntax error: expected statement after if condition.",
+                    tokens[*pos - 1].line,
+                    tokens[*pos - 1].col
+                ));
+            }
+            ASTree::Program(_) => unreachable!(),
+        },
+    );
 
     // Check for optional "else" branch and consume if present.
-    let else_branch = if let Some(token) = tokens.get(*pos)
+    let else_branch: Option<Box<Statement>> = if let Some(token) = tokens.get(*pos)
         && token.token_type == "ELSE"
     {
         *pos += 1; // consume 'else'
@@ -763,7 +771,7 @@ fn parse_if_stmt(tokens: &[Token], pos: &mut usize, indent_depth: usize) -> Resu
 
     // pos should now be past the end of the if statement,
     // so subtract 1 to get the end of the statement for the span.
-    let span = Span::new(
+    let span: Span = Span::new(
         Location::new(tokens[if_pos].line, tokens[if_pos].col),
         Location::new(tokens[*pos - 1].line, tokens[*pos - 1].col),
     );
@@ -883,7 +891,7 @@ fn parse_for_stmt(
     *pos += 1; // consume 'for'
 
     // Check for '('
-    let left_paren_token = tokens
+    let left_paren_token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     if left_paren_token.token_type != "LEFT_PAREN" {
@@ -895,7 +903,7 @@ fn parse_for_stmt(
     *pos += 1; // consume '('
 
     // Parse the initializer, which can be a variable declaration, an expression statement, or empty.
-    let initializer = if let Some(token) = tokens.get(*pos) {
+    let initializer: Option<ASTree> = if let Some(token) = tokens.get(*pos) {
         if token.token_type == "SEMICOLON" {
             *pos += 1; // consume ';'
             None
@@ -909,7 +917,7 @@ fn parse_for_stmt(
     };
 
     // Extract the initializer declaration if it exists, so we can put it in the desugared block.
-    let init_decl = match initializer {
+    let init_decl: Option<Declaration> = match initializer {
         Some(ASTree::Declaration(decl)) => Some(decl),
         Some(ASTree::Expr(_)) => {
             return Err(format!(
@@ -923,7 +931,7 @@ fn parse_for_stmt(
     };
 
     // Parse the condition, which is an optional expression followed by a semicolon.
-    let condition = if let Some(token) = tokens.get(*pos) {
+    let condition: Option<Expression> = if let Some(token) = tokens.get(*pos) {
         if token.token_type == "SEMICOLON" {
             None
         } else {
@@ -933,7 +941,7 @@ fn parse_for_stmt(
         return Err("Unexpected end of input.".to_string());
     };
     // Check for ';' after condition
-    let semicolon_after_condition = tokens
+    let semicolon_after_condition: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     if semicolon_after_condition.token_type != "SEMICOLON" {
@@ -947,7 +955,7 @@ fn parse_for_stmt(
     *pos += 1; // consume ';'
 
     // Parse the increment, which is an optional expression followed by a right parenthesis.
-    let increment = if let Some(token) = tokens.get(*pos) {
+    let increment: Option<Expression> = if let Some(token) = tokens.get(*pos) {
         if token.token_type == "RIGHT_PAREN" {
             None
         } else {
@@ -957,7 +965,7 @@ fn parse_for_stmt(
         return Err("Unexpected end of input.".to_string());
     };
     // Check for ')' after increment
-    let right_paren_token = tokens
+    let right_paren_token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     if right_paren_token.token_type != "RIGHT_PAREN" {
@@ -969,7 +977,7 @@ fn parse_for_stmt(
     *pos += 1; // consume ')'
 
     // Parse the body of the for loop as a statement.
-    let body = Box::new(match parse_statement(tokens, pos, indent_depth + 1)? {
+    let body: Box<Statement> = Box::new(match parse_statement(tokens, pos, indent_depth + 1)? {
         ASTree::Declaration(Declaration::Statement(stmt, _)) => stmt,
         ASTree::Declaration(Declaration::VarDecl(..)) => {
             return Err(format!(
@@ -997,7 +1005,7 @@ fn parse_for_stmt(
 
     // pos should now be past the end of the for statement,
     // so subtract 1 to get the end of the statement for the span.
-    let span = Span::new(
+    let span: Span = Span::new(
         Location::new(tokens[for_pos].line, tokens[for_pos].col),
         Location::new(tokens[*pos - 1].line, tokens[*pos - 1].col),
     );
@@ -1006,7 +1014,7 @@ fn parse_for_stmt(
     // increment as Option<Expression>, and body as Box<Statement>.
     // We need to desugar this into a while loop as described in the comment above.
 
-    let desugared_body = if let Some(increment_expr) = increment {
+    let desugared_body: Statement = if let Some(increment_expr) = increment {
         let new_span = increment_expr.span.clone();
         Statement::Block(vec![
             Declaration::Statement(*body, indent_depth + 1),
@@ -1020,7 +1028,7 @@ fn parse_for_stmt(
         *body
     };
 
-    let desugared_while = Statement::WhileStmt(WhileStmt::new(
+    let desugared_while: Statement = Statement::WhileStmt(WhileStmt::new(
         condition.unwrap_or_else(|| {
             Expression::new(
                 ExpressionEnum::Primary(Primary::new(
@@ -1038,7 +1046,7 @@ fn parse_for_stmt(
 
     // If there is an initializer, the desugared for loop is a block containing the initializer.
     // Otherwise, it's a block containing just the desugared while loop.
-    let desugared_for = if let Some(init) = init_decl {
+    let desugared_for: Statement = if let Some(init) = init_decl {
         Statement::Block(vec![
             init,
             Declaration::Statement(desugared_while, indent_depth + 1),
@@ -1066,7 +1074,7 @@ fn parse_statement(
     pos: &mut usize,
     indent_depth: usize,
 ) -> Result<ASTree, String> {
-    let token = tokens
+    let token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     if token.token_type == "LEFT_BRACE" {
@@ -1097,12 +1105,16 @@ fn parse_var_decl(
     indent_depth: usize,
 ) -> Result<ASTree, String> {
     // Handle "var" token
-    let var_pos = *pos;
-
+    let var_pos: usize = *pos;
     *pos += 1; // consume 'var'
-    let name_token = tokens
-        .get(*pos)
-        .ok_or_else(|| "Syntax error: expected variable name after 'var'.".to_string())?;
+
+    let name_token: &Token = tokens.get(*pos).ok_or_else(|| {
+        let var_tok = &tokens[var_pos];
+        format!(
+            "[line {}:{}] Syntax error: expected variable name after 'var'.",
+            var_tok.line, var_tok.col
+        )
+    })?;
     if name_token.token_type != "IDENTIFIER" {
         return Err(format!(
             "[line {}:{}] Syntax error: expected variable name after 'var', but found '{}'.",
@@ -1112,8 +1124,8 @@ fn parse_var_decl(
     *pos += 1; // consume the variable name
 
     // Default values for the AST node fields, which will be updated if we find an initializer.
-    let name = name_token.lexeme.clone();
-    let mut initializer = None;
+    let name: String = name_token.lexeme.clone();
+    let mut initializer: Option<Expression> = None;
 
     // Check for an optional initializer. If there is an '=' token, consume it and
     // parse the initializer expression.
@@ -1125,9 +1137,13 @@ fn parse_var_decl(
     }
 
     // Handle ";"
-    let semicolon_token = tokens
-        .get(*pos)
-        .ok_or_else(|| "Syntax error: expected ';' after variable declaration.".to_string())?;
+    let semicolon_token: &Token = tokens.get(*pos).ok_or_else(|| {
+        let last = &tokens[(*pos).saturating_sub(1)];
+        format!(
+            "[line {}:{}] Syntax error: expected ';' after variable declaration, but found EOF.",
+            last.line, last.col
+        )
+    })?;
     if semicolon_token.token_type != "SEMICOLON" {
         return Err(format!(
             "[line {}:{}] Syntax error: expected ';' after variable declaration, but found '{}'.",
@@ -1137,7 +1153,7 @@ fn parse_var_decl(
     *pos += 1; // consume ';'
 
     // Build the AST node and return it.
-    let span = Span::new(
+    let span: Span = Span::new(
         Location::new(tokens[var_pos].line, tokens[var_pos].col),
         Location::new(
             semicolon_token.line,
@@ -1145,7 +1161,12 @@ fn parse_var_decl(
         ),
     );
     Ok(ASTree::Declaration(Declaration::VarDecl(
-        VarDecl::new(name, initializer, span),
+        VarDecl::new(
+            name,
+            Location::new(name_token.line, name_token.col),
+            initializer,
+            span,
+        ),
         indent_depth,
     )))
 }
@@ -1165,20 +1186,24 @@ fn parse_fun_decl(
     *pos += 1; // consume 'fun'
 
     // Handle function name
-    let name_token = tokens
-        .get(*pos)
-        .ok_or_else(|| "Syntax error: expected function name after 'fun'.".to_string())?;
+    let name_token: &Token = tokens.get(*pos).ok_or_else(|| {
+        let fun_tok = &tokens[fun_pos];
+        format!(
+            "[line {}:{}] Syntax error: expected function name after 'fun'.",
+            fun_tok.line, fun_tok.col
+        )
+    })?;
     if name_token.token_type != "IDENTIFIER" {
         return Err(format!(
             "[line {}:{}] Syntax error: expected function name after 'fun', but found '{}'.",
             name_token.line, name_token.col, name_token.lexeme
         ));
     }
-    let name = name_token.lexeme.clone();
+    let name: String = name_token.lexeme.clone();
     *pos += 1; // consume the function name
 
     // Check for '('
-    let left_paren_token = tokens
+    let left_paren_token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     if left_paren_token.token_type != "LEFT_PAREN" {
@@ -1190,13 +1215,13 @@ fn parse_fun_decl(
     *pos += 1; // consume '('
 
     // Parse parameters, which are zero or more identifiers separated by commas, followed by a ')'.
-    let mut parameters: Vec<String> = Vec::new();
+    let mut parameters: Vec<(String, Location)> = Vec::new();
     loop {
         if let Some(token) = tokens.get(*pos) {
             if token.token_type == "RIGHT_PAREN" {
                 break; // end of parameter list
             } else if token.token_type == "IDENTIFIER" {
-                parameters.push(token.lexeme.clone());
+                parameters.push((token.lexeme.clone(), Location::new(token.line, token.col)));
                 *pos += 1; // consume the identifier
                 // If the next token is a comma, consume it and continue parsing parameters.
                 if let Some(next_token) = tokens.get(*pos) {
@@ -1211,7 +1236,11 @@ fn parse_fun_decl(
                         ));
                     }
                 } else {
-                    return Err("Unexpected end of input.".to_string());
+                    let last = &tokens[(*pos).saturating_sub(1)];
+                    return Err(format!(
+                        "[line {}:{}] Syntax error: unexpected EOF in function parameter list.",
+                        last.line, last.col
+                    ));
                 }
             } else {
                 return Err(format!(
@@ -1220,13 +1249,17 @@ fn parse_fun_decl(
                 ));
             }
         } else {
-            return Err("Unexpected end of input.".to_string());
+            let last = &tokens[(*pos).saturating_sub(1)];
+            return Err(format!(
+                "[line {}:{}] Syntax error: unexpected EOF in function parameter list.",
+                last.line, last.col
+            ));
         }
     }
     *pos += 1; // consume ')'
 
     // Parse the function body, which is a block statement.
-    let body = match parse_block(tokens, pos, indent_depth + 1)? {
+    let body: Statement = match parse_block(tokens, pos, indent_depth + 1)? {
         ASTree::Declaration(Declaration::Statement(stmt, _)) => {
             // Check that the statement is a block statement, since function bodies must be blocks.
             match stmt {
@@ -1264,7 +1297,7 @@ fn parse_fun_decl(
         ASTree::Program(_) => unreachable!(),
     };
 
-    let span = Span::new(
+    let span: Span = Span::new(
         Location::new(tokens[fun_pos].line, tokens[fun_pos].col),
         Location::new(tokens[*pos - 1].line, tokens[*pos - 1].col),
     );
@@ -1283,7 +1316,7 @@ fn parse_declaration(
     pos: &mut usize,
     indent_depth: usize,
 ) -> Result<ASTree, String> {
-    let token = tokens
+    let token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     if token.token_type == "VAR" {
@@ -1311,7 +1344,7 @@ fn parse_program(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
     while let Some(token) = tokens.get(*pos) {
         if token.token_type == "EOF" {
             *pos += 1; // consume EOF
-            let span = Span::new(
+            let span: Span = Span::new(
                 Location::new(1, 1),
                 Location::new(token.line, token.col + token.lexeme.len()),
             );
@@ -1354,7 +1387,7 @@ pub fn parse(tokens: &[Token]) -> Result<ASTree, String> {
         Ok(ast) => Ok(ast),
         Err(e) if e == NOT_A_PROGRAM => {
             // Try parsing an expression statement without the EOF token.
-            let tokens_without_eof = if let Some(last_token) = tokens.last() {
+            let tokens_without_eof: &[Token] = if let Some(last_token) = tokens.last() {
                 if last_token.token_type == "EOF" {
                     &tokens[..tokens.len() - 1]
                 } else {
@@ -1363,8 +1396,8 @@ pub fn parse(tokens: &[Token]) -> Result<ASTree, String> {
             } else {
                 tokens
             };
-            let mut expr_pos = 0;
-            let expr = parse_expression(tokens_without_eof, &mut expr_pos)?;
+            let mut expr_pos: usize = 0;
+            let expr: Expression = parse_expression(tokens_without_eof, &mut expr_pos)?;
             if let Some(leftover) = tokens_without_eof.get(expr_pos) {
                 return Err(format!(
                     "[line {}:{}] Syntax error: unexpected token '{}'.",

@@ -1,0 +1,18 @@
+print clock();
+
+// builtin shadowing
+fun clock() {
+    return "tic-toc";
+}
+print clock();
+print "";
+
+// user callable shadowing
+fun foo() {print 1;}
+foo();
+
+fun foo() {print clock;}
+foo();
+
+fun foo() {return clock();}
+print foo();

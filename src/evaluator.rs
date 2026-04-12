@@ -3,19 +3,25 @@
 //! This module defines the `evaluate` function, which takes an expression from the AST and
 //! computes its value according to Lox's semantics. This function is called by the main program
 //! when the user runs in "evaluate" mode and a single expression is found by the parser
-//! (else an error is raised).
+//! (else an error is raised). Evaluation is also used in "run" mode when executing statements that
+//! contain expressions.
+//!
+//! The `evaluate` function recursively evaluates sub-expressions, reducing them to their literal
+//! values, until the entire expression is reduced to a single `Literal` or a runtime error occurs.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::EXIT_CODE_RUNTIME_ERROR;
-use crate::builtins::BuiltIns;
+use crate::environment::EnvRc;
 use crate::environment::Environment;
-use crate::parser::ast::{Expression, ExpressionEnum, Literal, Operator, Primary, PrimaryEnum};
+use crate::parser::Location;
+use crate::parser::ast::{
+    Expression, ExpressionEnum, Literal, Operator, Primary, PrimaryEnum, Statement,
+};
 use crate::parser::span::Span;
-use crate::runner::{ProgramState, run_stmt};
-
-type EnvRc = Rc<RefCell<Environment>>;
+use crate::resolver::LocalsType;
+use crate::runner::ProgramState;
 
 /// An error that occurs during evaluation of an expression, e.g. division by zero or
 /// operations on incompatible types.
@@ -40,26 +46,40 @@ impl From<RuntimeError> for RunError {
 pub fn evaluate(
     expr: &Expression,
     env: &EnvRc,
-    builtins: &Rc<BuiltIns>,
+    locals_map: &LocalsType,
 ) -> Result<Literal, RuntimeError> {
     match &expr.expr {
-        ExpressionEnum::Primary(p) => eval_primary(p, env, builtins),
+        ExpressionEnum::Primary(p) => eval_primary(p, env, locals_map),
 
-        ExpressionEnum::Unary(op, right) => eval_unary(op, right, &expr.span, env, builtins),
+        ExpressionEnum::Unary(op, right) => eval_unary(op, right, &expr.span, env, locals_map),
 
         ExpressionEnum::Factor(op, left, right)
         | ExpressionEnum::Term(op, left, right)
         | ExpressionEnum::Comparison(op, left, right)
         | ExpressionEnum::Equality(op, left, right) => {
-            eval_infix(op, left, right, &expr.span, env, builtins)
+            eval_infix(op, left, right, &expr.span, env, locals_map)
         }
 
-        ExpressionEnum::Logical(op, left, right) => eval_logical(op, left, right, env, builtins),
+        ExpressionEnum::Logical(op, left, right) => eval_logical(op, left, right, env, locals_map),
 
         ExpressionEnum::Assignment(name, val) => {
-            if let PrimaryEnum::Identifier(var_name) = &name.p {
-                let val = evaluate(val, env, builtins)?;
-                if env.borrow_mut().set_var(var_name, val.clone()) {
+            if let PrimaryEnum::Identifier(var_name, id) = &name.p {
+                let val = evaluate(val, env, locals_map)?;
+                let found = if let Some(&depth) = locals_map.get(id) {
+                    Environment::assign_at(env, depth, var_name, val.clone())
+                } else {
+                    // Not in locals_map — evaluate mode with no resolver pass.
+                    env.borrow_mut()
+                        .vars
+                        .contains_key(var_name)
+                        .then(|| {
+                            env.borrow_mut()
+                                .vars
+                                .insert(var_name.to_string(), val.clone());
+                        })
+                        .is_some()
+                };
+                if found {
                     Ok(val)
                 } else {
                     Err(RuntimeError {
@@ -73,34 +93,34 @@ pub fn evaluate(
         }
 
         ExpressionEnum::Call(callee, args) => {
-            // Special case: built-in functions are identified by name and stored separately
-            // from user-defined functions, so we check for them first.
-            if let ExpressionEnum::Primary(Primary {
-                p: PrimaryEnum::Identifier(func_name),
-                ..
-            }) = &callee.expr
-                && let Some(func) = builtins.functions.get(func_name)
-            {
-                let arg_vals = args
-                    .args
-                    .iter()
-                    .map(|arg| evaluate(arg, env, builtins))
-                    .collect::<Result<Vec<_>, _>>()?;
-                return match func(&arg_vals) {
-                    Ok(result) => Ok(result),
-                    Err(e) => Err(RuntimeError {
-                        message: e.message,
-                        span: args.span.clone(),
-                    }),
-                };
-            }
-
-            // General case: evaluate the callee to get a value, then call it if it's a Callable.
+            // Evaluate the callee to get a value, then dispatch on its type.
             // This naturally handles simple identifiers, chained calls like `f()()`, etc.
-            let callee_val = evaluate(callee, env, builtins)?;
+            // NativeCallable and UserCallable are both ordinary Literal values in the env.
+            let callee_val: Literal = evaluate(callee, env, locals_map)?;
             match callee_val {
-                Literal::Callable(callable) => {
-                    let arity = callable.decl.params.len();
+                Literal::NativeCallable(native) => {
+                    if args.args.len() != native.arity {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "Runtime error: expected {} arguments but got {}",
+                                native.arity,
+                                args.args.len()
+                            ),
+                            span: expr.span.clone(),
+                        });
+                    }
+                    let arg_vals: Vec<Literal> = args
+                        .args
+                        .iter()
+                        .map(|arg| evaluate(arg, env, locals_map))
+                        .collect::<Result<Vec<Literal>, RuntimeError>>()?;
+                    (native.func)(&arg_vals).map_err(|msg| RuntimeError {
+                        message: msg,
+                        span: args.span.clone(),
+                    })
+                }
+                Literal::UserCallable(callable) => {
+                    let arity: usize = callable.decl.params.len();
                     if args.args.len() != arity {
                         return Err(RuntimeError {
                             message: format!(
@@ -116,25 +136,39 @@ pub fn evaluate(
                     let arg_vals: Vec<Literal> = args
                         .args
                         .iter()
-                        .map(|arg| evaluate(arg, env, builtins))
-                        .collect::<Result<Vec<_>, RuntimeError>>()?;
+                        .map(|arg| evaluate(arg, env, locals_map))
+                        .collect::<Result<Vec<Literal>, RuntimeError>>()?;
 
                     // Build the function's own scope with the closure as parent (lexical scoping).
-                    let mut fn_env = Environment::new();
+                    let mut fn_env: Environment = Environment::new();
                     fn_env.parent = Some(Rc::clone(&callable.closure));
 
                     // Bind the function's parameters to the argument values in the function scope.
-                    for (param, val) in callable.decl.params.iter().zip(arg_vals) {
+                    for ((param, _loc), val) in callable.decl.params.iter().zip(arg_vals) {
                         fn_env.vars.insert(param.clone(), val);
                     }
 
-                    let mut state = ProgramState {
+                    let mut state: ProgramState = ProgramState {
                         env: Rc::new(RefCell::new(fn_env)),
-                        builtins: builtins.clone(),
+                    };
+
+                    // Run the body block's declarations directly in fn_env (no child scope),
+                    // matching the resolver which merges the parameter scope and body block
+                    // scope into one.  This lets redeclaration of params be caught by the
+                    // resolver, and keeps the environment depth in sync with resolver depths.
+                    let body_decls = match callable.decl.body.as_ref() {
+                        Statement::Block(decls) => decls,
+                        _ => unreachable!("function body must be a block"),
                     };
 
                     // Evaluate the function body, catching ReturnSignal as a normal return value.
-                    match run_stmt(&callable.decl.body, &mut state) {
+                    match (|| {
+                        let mut last = Literal::Nil;
+                        for decl in body_decls {
+                            last = crate::runner::run_decl(decl, &mut state, locals_map)?;
+                        }
+                        Ok(last)
+                    })() {
                         Ok(val) => Ok(val),
                         Err(RunError::ReturnSignal(val)) => Ok(val),
                         Err(RunError::RuntimeError(e)) => Err(e),
@@ -153,18 +187,27 @@ pub fn evaluate(
 fn eval_primary(
     primary: &Primary,
     env: &EnvRc,
-    builtins: &Rc<BuiltIns>,
+    locals_map: &LocalsType,
 ) -> Result<Literal, RuntimeError> {
     match &primary.p {
         PrimaryEnum::Literal(lit) => Ok(lit.clone()),
-        PrimaryEnum::Grouping(expr) => evaluate(expr, env, builtins),
-        PrimaryEnum::Identifier(name) => match env.borrow().get_var(name) {
-            Some(val) => Ok(val.clone()),
-            None => Err(RuntimeError {
-                message: format!("Runtime error: undefined variable '{}'", name),
-                span: primary.span.clone(),
-            }),
-        },
+        PrimaryEnum::Grouping(expr) => evaluate(expr, env, locals_map),
+        PrimaryEnum::Identifier(name, id) => {
+            let found = if let Some(&depth) = locals_map.get(id) {
+                Environment::get_at(env, depth, name)
+            } else {
+                // Not in locals_map — evaluate mode with no resolver pass; fall back to
+                // current env (which is global in evaluate mode).
+                env.borrow().vars.get(name).cloned()
+            };
+            match found {
+                Some(val) => Ok(val),
+                None => Err(RuntimeError {
+                    message: format!("Runtime error: undefined variable '{}'", name),
+                    span: primary.span.clone(),
+                }),
+            }
+        }
     }
 }
 
@@ -179,10 +222,10 @@ fn eval_infix(
     right: &Expression,
     span: &Span,
     env: &EnvRc,
-    builtins: &Rc<BuiltIns>,
+    locals_map: &LocalsType,
 ) -> Result<Literal, RuntimeError> {
-    let left_val = evaluate(left, env, builtins)?;
-    let right_val = evaluate(right, env, builtins)?;
+    let left_val: Literal = evaluate(left, env, locals_map)?;
+    let right_val: Literal = evaluate(right, env, locals_map)?;
 
     // String concatenation with "+"
     if op.op.as_str() == "+"
@@ -267,9 +310,9 @@ fn eval_unary(
     right: &Expression,
     span: &Span,
     env: &EnvRc,
-    builtins: &Rc<BuiltIns>,
+    locals_map: &LocalsType,
 ) -> Result<Literal, RuntimeError> {
-    let right_val = evaluate(right, env, builtins)?;
+    let right_val: Literal = evaluate(right, env, locals_map)?;
     match op.op.as_str() {
         "-" => {
             // Try to parse right_val as a number, negate it, and return the result as a string
@@ -309,23 +352,23 @@ fn eval_logical(
     left: &Expression,
     right: &Expression,
     env: &EnvRc,
-    builtins: &Rc<BuiltIns>,
+    locals_map: &LocalsType,
 ) -> Result<Literal, RuntimeError> {
     match op.op.as_str() {
         "and" => {
-            let left_val = evaluate(left, env, builtins)?;
+            let left_val: Literal = evaluate(left, env, locals_map)?;
             if !is_truthy(&left_val) {
                 Ok(left_val) // Short-circuit: return left operand if it's falsy
             } else {
-                evaluate(right, env, builtins) // Otherwise evaluate and return right operand
+                evaluate(right, env, locals_map) // Otherwise evaluate and return right operand
             }
         }
         "or" => {
-            let left_val = evaluate(left, env, builtins)?;
+            let left_val: Literal = evaluate(left, env, locals_map)?;
             if is_truthy(&left_val) {
                 Ok(left_val) // Short-circuit: return left operand if it's truthy
             } else {
-                evaluate(right, env, builtins) // Otherwise evaluate and return right operand
+                evaluate(right, env, locals_map) // Otherwise evaluate and return right operand
             }
         }
         _ => unreachable!(), // parser only creates Logical for 'and' and 'or'
@@ -334,8 +377,8 @@ fn eval_logical(
 
 /// Format a runtime error with source code context and return it as a string.
 pub fn handle_runtime_error(e: &RuntimeError, source: &str) -> () {
-    let start_pos = &e.span.start;
-    let end_pos = &e.span.end;
+    let start_pos: &Location = &e.span.start;
+    let end_pos: &Location = &e.span.end;
     if start_pos.line == end_pos.line {
         // Single-line error
         // Print the line with the error and an underline pointing to the error span

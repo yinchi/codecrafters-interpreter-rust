@@ -6,6 +6,10 @@ use std::rc::Rc;
 
 use crate::parser::ast::Literal;
 
+/// An `Rc<RefCell<Environment>>` is used to represent the current environment, which is shared
+/// between the main program and any closures that capture it. The `Rc` allows multiple closures to
+/// share the same environment, and the `RefCell` allows mutation of the environment (eg. variable
+/// assignment) even when it's shared.
 pub type EnvRc = Rc<RefCell<Environment>>;
 
 /// Stores variable bindings for a scope.  The parent chain implements lexical scoping.
@@ -22,25 +26,42 @@ impl Environment {
         }
     }
 
-    /// Look up a variable by walking the environment chain.
-    pub fn get_var(&self, name: &str) -> Option<Literal> {
-        if let Some(val) = self.vars.get(name) {
-            return Some(val.clone());
+    /// Look up a variable exactly `distance` hops up the environment chain.
+    /// Panics if the chain is shorter than `distance` (resolver bug).
+    pub fn get_at(env: &EnvRc, distance: usize, name: &str) -> Option<Literal> {
+        let mut current = Rc::clone(env);
+        for _ in 0..distance {
+            let parent = current
+                .borrow()
+                .parent
+                .as_ref()
+                .expect("resolver produced invalid depth")
+                .clone();
+            current = parent;
         }
-        self.parent.as_ref()?.borrow().get_var(name)
+        current.borrow().vars.get(name).cloned()
     }
 
-    /// Assign to an existing variable somewhere in the environment chain.
-    /// Returns `true` if the variable was found and updated, `false` if undeclared.
-    pub fn set_var(&mut self, name: &str, val: Literal) -> bool {
-        if self.vars.contains_key(name) {
-            self.vars.insert(name.to_string(), val);
-            return true;
+    /// Assign to a variable exactly `distance` hops up the environment chain.
+    /// Returns `true` if found and updated, `false` if the name is absent at that scope
+    /// (resolver bug — the variable should always be present at the resolved depth).
+    pub fn assign_at(env: &EnvRc, distance: usize, name: &str, val: Literal) -> bool {
+        let mut current = Rc::clone(env);
+        for _ in 0..distance {
+            let parent = current
+                .borrow()
+                .parent
+                .as_ref()
+                .expect("resolver produced invalid depth")
+                .clone();
+            current = parent;
         }
-        if let Some(parent) = &self.parent {
-            return parent.borrow_mut().set_var(name, val);
+        if current.borrow().vars.contains_key(name) {
+            current.borrow_mut().vars.insert(name.to_string(), val);
+            true
+        } else {
+            false
         }
-        false
     }
 }
 

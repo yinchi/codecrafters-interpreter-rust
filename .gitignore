@@ -12,3 +12,4 @@ target/
 # My files
 test.lox
 *.log
+tests/temp*.lox

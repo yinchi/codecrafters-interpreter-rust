@@ -108,7 +108,7 @@ impl Tokenizer {
         // Take ownership of the current state to avoid borrowing issues
         // This sets the state in the struct to Default temporarily, but we will set it
         // to the correct state before returning.
-        let state = std::mem::replace(&mut self.state, TokenizerState::Default);
+        let state: TokenizerState = std::mem::replace(&mut self.state, TokenizerState::Default);
 
         match state {
             TokenizerState::Finished => {
@@ -250,13 +250,13 @@ impl Tokenizer {
                 match c {
                     '0'..='9' => {
                         // Extend the integer part of the number.
-                        let mut new_str = current_str.clone();
+                        let mut new_str: String = current_str.clone();
                         new_str.push(c);
                         self.state = TokenizerState::Number(new_str);
                     }
                     '.' => {
                         // Transition into the fractional part of the number.
-                        let mut new_str = current_str.clone();
+                        let mut new_str: String = current_str.clone();
                         new_str.push(c);
                         self.state = TokenizerState::NumberDot(new_str);
                     }
@@ -264,7 +264,7 @@ impl Tokenizer {
                         // Can safely unwrap here assuming our tokenizer is correct.
                         // Ensures integer literals like "123" are emitted as "123.0" to match
                         // the expected output format.
-                        let value = current_str.parse::<f64>().unwrap();
+                        let value: f64 = current_str.parse::<f64>().unwrap();
 
                         self.push("NUMBER".into(), current_str.clone(), format_num(value));
                         // Re-process the current character in the Default state.
@@ -278,13 +278,13 @@ impl Tokenizer {
                 match c {
                     '0'..='9' => {
                         // Extend the fractional part of the number.
-                        let mut new_str = current_str.clone();
+                        let mut new_str: String = current_str.clone();
                         new_str.push(c);
                         self.state = TokenizerState::NumberDot(new_str);
                     }
                     _ => {
                         // End of number literal
-                        let value = current_str.parse::<f64>().unwrap();
+                        let value: f64 = current_str.parse::<f64>().unwrap();
                         self.push("NUMBER".into(), current_str.clone(), format_num(value));
                         // Re-process the current character in the Default state.
                         // Decrement after to fix double-firing of `curr_pos += 1`.
@@ -296,7 +296,7 @@ impl Tokenizer {
             TokenizerState::Identifier(current_str) => {
                 match c {
                     '_' | 'a'..='z' | 'A'..='Z' | '0'..='9' => {
-                        let mut new_str = current_str.clone();
+                        let mut new_str: String = current_str.clone();
                         new_str.push(c);
                         self.state = TokenizerState::Identifier(new_str);
                     }
@@ -304,11 +304,12 @@ impl Tokenizer {
                         // Check if the identifier is a reserved keyword
                         // push either (<KEYWORD>, <keyword>, null) or
                         // (IDENTIFIER, lexeme, null)
-                        let token_type = if RESERVED_KEYWORDS.contains(&current_str.as_str()) {
-                            current_str.to_uppercase()
-                        } else {
-                            "IDENTIFIER".into()
-                        };
+                        let token_type: String =
+                            if RESERVED_KEYWORDS.contains(&current_str.as_str()) {
+                                current_str.to_uppercase()
+                            } else {
+                                "IDENTIFIER".into()
+                            };
                         self.push(token_type, current_str.clone(), "null".into());
                         // Re-process the current character in the Default state.
                         // Decrement after to fix double-firing of `curr_pos += 1`.
@@ -321,19 +322,19 @@ impl Tokenizer {
                 match c {
                     '"' => {
                         // End of string
-                        let lexeme = format!("\"{}\"", current_str);
+                        let lexeme: String = format!("\"{}\"", current_str);
                         self.push("STRING".into(), lexeme, current_str.clone());
                     }
                     '\n' => {
                         // Lox strings can span multiple lines; just include the newline.
-                        let mut new_str = current_str.clone();
+                        let mut new_str: String = current_str.clone();
                         new_str.push('\n');
                         self.state = TokenizerState::String(new_str);
                         self.curr_line += 1;
                         self.curr_pos = 0; // Becomes 1 after incrementing at end of `match`.
                     }
                     _ => {
-                        let mut new_str = current_str.clone();
+                        let mut new_str: String = current_str.clone();
                         new_str.push(c);
                         // Restore the String state with the updated string.
                         self.state = TokenizerState::String(new_str);
@@ -346,7 +347,7 @@ impl Tokenizer {
 
     /// Handle the final state after processing all characters.
     fn handle_final_state(&mut self) {
-        let state = std::mem::replace(&mut self.state, TokenizerState::Finished);
+        let state: TokenizerState = std::mem::replace(&mut self.state, TokenizerState::Finished);
         match state {
             TokenizerState::WaitingEquals(curr_token, curr_lexeme) => {
                 self.push(curr_token, curr_lexeme, "null".into());
@@ -356,7 +357,7 @@ impl Tokenizer {
             }
             TokenizerState::Number(s) | TokenizerState::NumberDot(s) => {
                 // Last token is a number
-                let value = s.parse::<f64>().unwrap();
+                let value: f64 = s.parse::<f64>().unwrap();
                 self.push("NUMBER".into(), s.clone(), format_num(value));
             }
             TokenizerState::Identifier(s) => {
@@ -383,7 +384,7 @@ impl Tokenizer {
 /// Apply the tokenizer to the input string and return the list of tokens and whether any
 /// errors were encountered.
 pub fn tokenize(input: &str) -> (Vec<Token>, bool) {
-    let mut tokenizer = Tokenizer::new();
+    let mut tokenizer: Tokenizer = Tokenizer::new();
     for c in input.chars() {
         tokenizer.handle_char(c);
     }

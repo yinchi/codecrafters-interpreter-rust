@@ -1,0 +1,17 @@
+// Knuth man or boy test
+fun A(k, x1, x2, x3, x4, x5) {
+  fun B() {
+    k = k - 1;
+    return A(k, B, x1, x2, x3, x4);
+  }
+  if (k <= 0) return x4() + x5();
+  return B();
+}
+
+fun p1()  { return  1; }
+fun m1a() { return -1; }
+fun m1b() { return -1; }
+fun p1b() { return  1; }
+fun z()   { return  0; }
+
+print A(10, p1, m1a, m1b, p1b, z);

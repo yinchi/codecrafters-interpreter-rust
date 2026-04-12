@@ -3,18 +3,22 @@ use std::fmt::{Debug, Display};
 use super::*;
 
 impl From<Literal> for PrimaryEnum {
+    /// Cast from Literal to PrimaryEnum.
     fn from(l: Literal) -> Self {
         PrimaryEnum::Literal(l)
     }
 }
 
 impl From<Primary> for ExpressionEnum {
+    /// Cast from Primary to ExpressionEnum.
     fn from(p: Primary) -> Self {
         ExpressionEnum::Primary(p)
     }
 }
 
 impl From<ExpressionEnum> for Expression {
+    /// Cast from ExpressionEnum to Expression, inferring the span of the full expression from the
+    /// spans of the sub-expressions.
     fn from(e_enum: ExpressionEnum) -> Self {
         let span = match &e_enum {
             ExpressionEnum::Primary(primary) => primary.span.clone(),
@@ -55,9 +59,16 @@ impl From<ExpressionEnum> for Expression {
 }
 
 impl From<Primary> for Expression {
-    // Cast from Primary -> ExpressionEnum -> Expression, using the From impls defined above.
+    /// Cast from Primary -> ExpressionEnum -> Expression.
     fn from(p: Primary) -> Self {
         Self::from(ExpressionEnum::from(p))
+    }
+}
+
+impl PartialEq for UserCallable {
+    fn eq(&self, other: &Self) -> bool {
+        // Same function declaration (by Rc identity)?
+        Rc::ptr_eq(&self.decl, &other.decl)
     }
 }
 
@@ -72,20 +83,8 @@ impl Display for Literal {
             Literal::True => write!(f, "true"),
             Literal::False => write!(f, "false"),
             Literal::Nil => write!(f, "nil"),
-            Literal::Callable(callable) => write!(f, "<fn {}>", callable.decl.name),
-        }
-    }
-}
-
-impl Clone for Literal {
-    fn clone(&self) -> Self {
-        match self {
-            Literal::Number(n) => Literal::Number(*n),
-            Literal::String(s) => Literal::String(s.clone()),
-            Literal::True => Literal::True,
-            Literal::False => Literal::False,
-            Literal::Nil => Literal::Nil,
-            Literal::Callable(callable) => Literal::Callable(callable.clone()),
+            Literal::UserCallable(callable) => write!(f, "<fn {}>", callable.decl.name),
+            Literal::NativeCallable(callable) => write!(f, "<native fn {}>", callable.name),
         }
     }
 }
@@ -132,7 +131,12 @@ impl Debug for Declaration {
 
 impl Debug for FunDecl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let params_str = self.params.join(" ");
+        let params_str = self
+            .params
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         write!(f, "(fn! {} ({}) {:?})", self.name, params_str, self.body)
     }
 }
@@ -259,7 +263,7 @@ impl Debug for ExpressionEnum {
             }
             ExpressionEnum::Assignment(name, value) => write!(f, "(set! {:?} {:?})", name, value),
             ExpressionEnum::Call(callee, args) => {
-                let mut result = format!("({:?}", callee);
+                let mut result: String = format!("({:?}", callee);
                 for arg in &args.args {
                     result.push_str(&format!(" {:?}", arg));
                 }
@@ -281,7 +285,7 @@ impl Debug for PrimaryEnum {
         match self {
             PrimaryEnum::Literal(lit) => write!(f, "{:?}", lit),
             PrimaryEnum::Grouping(expr) => write!(f, "(group {:?})", expr),
-            PrimaryEnum::Identifier(name) => write!(f, "{}", name),
+            PrimaryEnum::Identifier(name, _id) => write!(f, "{}", name),
         }
     }
 }
@@ -305,7 +309,8 @@ impl Debug for Literal {
             Literal::True => write!(f, "true"),
             Literal::False => write!(f, "false"),
             Literal::Nil => write!(f, "nil"),
-            Literal::Callable(callable) => write!(f, "<fn {}>", callable.decl.name),
+            Literal::UserCallable(callable) => write!(f, "<fn {}>", callable.decl.name),
+            Literal::NativeCallable(callable) => write!(f, "<native fn {}>", callable.name),
         }
     }
 }
