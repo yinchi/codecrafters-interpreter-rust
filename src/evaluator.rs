@@ -10,16 +10,17 @@
 //! values, until the entire expression is reduced to a single `Literal` or a runtime error occurs.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::EXIT_CODE_RUNTIME_ERROR;
-use crate::environment::EnvRc;
-use crate::environment::Environment;
-use crate::parser::Location;
+use crate::environment::{EnvRc, Environment, new_env_rc};
 use crate::parser::ast::{
     Expression, ExpressionEnum, Literal, Operator, Primary, PrimaryEnum, Statement,
 };
-use crate::parser::span::Span;
+use crate::parser::{
+    Arguments, Location, LoxClass, LoxInstance, NativeCallable, Span, UserCallable,
+};
 use crate::resolver::LocalsType;
 use crate::runner::ProgramState;
 
@@ -99,87 +100,253 @@ pub fn evaluate(
             let callee_val: Literal = evaluate(callee, env, locals_map)?;
             match callee_val {
                 Literal::NativeCallable(native) => {
-                    if args.args.len() != native.arity {
-                        return Err(RuntimeError {
-                            message: format!(
-                                "Runtime error: expected {} arguments but got {}",
-                                native.arity,
-                                args.args.len()
-                            ),
-                            span: expr.span.clone(),
-                        });
-                    }
-                    let arg_vals: Vec<Literal> = args
-                        .args
-                        .iter()
-                        .map(|arg| evaluate(arg, env, locals_map))
-                        .collect::<Result<Vec<Literal>, RuntimeError>>()?;
-                    (native.func)(&arg_vals).map_err(|msg| RuntimeError {
-                        message: msg,
-                        span: args.span.clone(),
-                    })
+                    eval_native_call(native, args, env, locals_map, expr.span.clone())
                 }
                 Literal::UserCallable(callable) => {
-                    let arity: usize = callable.decl.params.len();
-                    if args.args.len() != arity {
-                        return Err(RuntimeError {
-                            message: format!(
-                                "Runtime error: expected {} arguments but got {}",
-                                arity,
-                                args.args.len()
-                            ),
-                            span: expr.span.clone(),
-                        });
-                    }
-
-                    // Evaluate arguments before touching the environment.
-                    let arg_vals: Vec<Literal> = args
-                        .args
-                        .iter()
-                        .map(|arg| evaluate(arg, env, locals_map))
-                        .collect::<Result<Vec<Literal>, RuntimeError>>()?;
-
-                    // Build the function's own scope with the closure as parent (lexical scoping).
-                    let mut fn_env: Environment = Environment::new();
-                    fn_env.parent = Some(Rc::clone(&callable.closure));
-
-                    // Bind the function's parameters to the argument values in the function scope.
-                    for ((param, _loc), val) in callable.decl.params.iter().zip(arg_vals) {
-                        fn_env.vars.insert(param.clone(), val);
-                    }
-
-                    let mut state: ProgramState = ProgramState {
-                        env: Rc::new(RefCell::new(fn_env)),
-                    };
-
-                    // Run the body block's declarations directly in fn_env (no child scope),
-                    // matching the resolver which merges the parameter scope and body block
-                    // scope into one.  This lets redeclaration of params be caught by the
-                    // resolver, and keeps the environment depth in sync with resolver depths.
-                    let body_decls = match callable.decl.body.as_ref() {
-                        Statement::Block(decls) => decls,
-                        _ => unreachable!("function body must be a block"),
-                    };
-
-                    // Evaluate the function body, catching ReturnSignal as a normal return value.
-                    match (|| {
-                        let mut last = Literal::Nil;
-                        for decl in body_decls {
-                            last = crate::runner::run_decl(decl, &mut state, locals_map)?;
-                        }
-                        Ok(last)
-                    })() {
-                        Ok(val) => Ok(val),
-                        Err(RunError::ReturnSignal(val)) => Ok(val),
-                        Err(RunError::RuntimeError(e)) => Err(e),
-                    }
+                    eval_user_call(callable, args, env, locals_map, expr.span.clone())
+                }
+                Literal::Class(cls) => {
+                    eval_class_call(cls, args, env, locals_map, expr.span.clone())
                 }
                 _ => Err(RuntimeError {
-                    message: "Runtime error: calling a non-callable value".into(),
-                    span: callee.span.clone(),
+                    message: "Runtime error: calling a non-callable value".to_string(),
+                    span: expr.span.clone(),
                 }),
             }
         }
+
+        ExpressionEnum::Get(object, name) => {
+            eval_get(evaluate(object, env, locals_map)?, name, expr.span.clone())
+        }
+
+        ExpressionEnum::Set(object, name, value) => eval_set(
+            evaluate(object, env, locals_map)?,
+            name,
+            evaluate(value, env, locals_map)?,
+            expr.span.clone(),
+        ),
+    }
+}
+
+/// Evaluate a call to a class, which creates a new instance of that class.
+fn eval_class_call(
+    cls: Rc<LoxClass>,
+    args: &Arguments,
+    env: &EnvRc,
+    locals_map: &LocalsType,
+    span: Span,
+) -> Result<Literal, RuntimeError> {
+    // Look up the "init" method on the class to determine the arity for this call (0 if no init).
+    let init_arity = find_method(&cls, "init")
+        .map(|initializer| initializer.decl.params.len())
+        .unwrap_or(0);
+
+    // Arity check for the class call.
+    if args.args.len() != init_arity {
+        return Err(RuntimeError {
+            message: format!(
+                "Runtime error: expected {} arguments but got {}",
+                init_arity,
+                args.args.len()
+            ),
+            span,
+        });
+    }
+
+    // Create a new instance of the class with an empty field map.
+    let instance = Rc::new(RefCell::new(LoxInstance::new(
+        Rc::clone(&cls),
+        HashMap::new(),
+    )));
+
+    // If an initializer is present, bind it to the new instance and call it with the
+    // provided arguments to initialize the instance.  Note we treat `init` like a normal method.
+    if let Some(initializer) = find_method(&cls, "init") {
+        let bound_initializer = bind_method(initializer, &instance);
+        eval_user_call(bound_initializer, args, env, locals_map, span)?;
+    }
+
+    Ok(Literal::Instance(instance))
+}
+
+/// Evaluate a call to a native function.
+fn eval_native_call(
+    native: NativeCallable,
+    args: &Arguments,
+    env: &EnvRc,
+    locals_map: &LocalsType,
+    span: Span,
+) -> Result<Literal, RuntimeError> {
+    if args.args.len() != native.arity {
+        return Err(RuntimeError {
+            message: format!(
+                "Runtime error: expected {} arguments but got {}",
+                native.arity,
+                args.args.len()
+            ),
+            span,
+        });
+    }
+
+    // Evaluate arguments before calling the native function
+    let arg_vals: Vec<Literal> = args
+        .args
+        .iter()
+        .map(|arg| evaluate(arg, env, locals_map))
+        .collect::<Result<Vec<Literal>, RuntimeError>>()?;
+
+    // Call the native function with the evaluated arguments, converting any error into a
+    // RuntimeError with the appropriate span.
+    (native.func)(&arg_vals).map_err(|msg| RuntimeError { message: msg, span })
+}
+
+/// Evaluate a call to a user-defined function.
+fn eval_user_call(
+    callable: UserCallable,
+    args: &Arguments,
+    env: &EnvRc,
+    locals_map: &LocalsType,
+    span: Span,
+) -> Result<Literal, RuntimeError> {
+    let arity: usize = callable.decl.params.len();
+    if args.args.len() != arity {
+        return Err(RuntimeError {
+            message: format!(
+                "Runtime error: expected {} arguments but got {}",
+                arity,
+                args.args.len()
+            ),
+            span,
+        });
+    }
+
+    // Evaluate arguments before touching the environment.
+    let arg_vals: Vec<Literal> = args
+        .args
+        .iter()
+        .map(|arg| evaluate(arg, env, locals_map))
+        .collect::<Result<Vec<Literal>, RuntimeError>>()?;
+
+    // Build the function's own scope with the closure as parent (lexical scoping).
+    let mut fn_env: Environment = Environment::new();
+    fn_env.parent = Some(Rc::clone(&callable.closure));
+
+    // Bind the function's parameters to the argument values in the function scope.
+    for ((param, _loc), val) in callable.decl.params.iter().zip(arg_vals) {
+        fn_env.vars.insert(param.clone(), val);
+    }
+
+    // Create a program state using `fn_env` as the environment.
+    let mut state: ProgramState = ProgramState {
+        env: Rc::new(RefCell::new(fn_env)),
+    };
+
+    // Extract the function body from the declaration.
+    let body_decls = match callable.decl.body.as_ref() {
+        Statement::Block(decls) => decls,
+        _ => unreachable!("function body must be a block"),
+    };
+
+    // If this function is an initializer, look up the "this" instance from the closure to return it later.
+    let this_instance = if callable.is_initializer {
+        Some(
+            Environment::get_at(&callable.closure, 0, "this").ok_or_else(|| RuntimeError {
+                message: "Runtime error: initializer missing bound instance".to_string(),
+                span: span.clone(),
+            })?,
+        )
+    } else {
+        None
+    };
+
+    // Evaluate the function body using `state`, using a closure that is invoked immediately.
+    // Match the closure result to distinguish between a normal return (Ok or Err with
+    // ReturnSignal), or a runtime error (Err with RuntimeError).
+    //
+    // If this function is an initializer, we ignore the returned value
+    // and always return the bound instance (`this`).  If there is no `this_instance`, then we are
+    // not in an initializer and we return the value from the body as normal (via `unwrap_or`).
+    match (|| {
+        let mut last = Literal::Nil;
+        for decl in body_decls {
+            last = crate::runner::run_decl(decl, &mut state, locals_map)?;
+        }
+        Ok(last)
+    })() {
+        Ok(val) => Ok(this_instance.unwrap_or(val)),
+        Err(RunError::ReturnSignal(val)) => Ok(this_instance.unwrap_or(val)),
+        Err(RunError::RuntimeError(e)) => Err(e),
+    }
+}
+
+/// Bind a method to an instance by creating a new closure that extends the method's existing
+/// closure with a new scope that binds `this` to the instance.  This allows the method to access
+/// the instance via `this` when called.
+fn bind_method(method: &UserCallable, instance: &Rc<RefCell<LoxInstance>>) -> UserCallable {
+    let bound_closure = new_env_rc(Some(&method.closure));
+    bound_closure
+        .borrow_mut()
+        .vars
+        .insert("this".to_string(), Literal::Instance(Rc::clone(instance)));
+
+    UserCallable {
+        decl: Rc::clone(&method.decl),
+        closure: bound_closure,
+        is_initializer: method.is_initializer,
+    }
+}
+
+/// Find a method with the given name in the class or its superclasses,
+/// returning it as a UserCallable if found. Returns None if not found.
+fn find_method<'a>(class: &'a Rc<LoxClass>, name: &str) -> Option<&'a UserCallable> {
+    if let Some(method) = class.methods.get(name) {
+        Some(method)
+    } else if let Some(superclass) = &class.superclass {
+        find_method(superclass, name)
+    } else {
+        None
+    }
+}
+
+/// Evaluate a "get" expression, which accesses a field on an instance.
+fn eval_get(obj: Literal, name: &str, span: Span) -> Result<Literal, RuntimeError> {
+    match obj {
+        Literal::Instance(inst) => {
+            if let Some(val) = inst.borrow().fields.get(name) {
+                Ok(val.clone())
+            } else if let Some(method) = find_method(&inst.borrow().class, name) {
+                Ok(Literal::UserCallable(bind_method(method, &inst)))
+            } else {
+                Err(RuntimeError {
+                    message: format!(
+                        "Runtime error: undefined property '{}' on instance of class '{}'",
+                        name,
+                        inst.borrow().class.name
+                    ),
+                    span,
+                })
+            }
+        }
+        _ => Err(RuntimeError {
+            message: "Only instances have properties.".into(),
+            span,
+        }),
+    }
+}
+
+/// Evaluate a "set" expression, which assigns a value to a field on an instance.
+fn eval_set(obj: Literal, name: &str, value: Literal, span: Span) -> Result<Literal, RuntimeError> {
+    match obj {
+        Literal::Instance(inst) => {
+            inst.borrow_mut()
+                .fields
+                .insert(name.to_string(), value.clone());
+            Ok(value)
+        }
+        _ => Err(RuntimeError {
+            message: "Only instances have fields.".into(),
+            span,
+        }),
     }
 }
 
@@ -204,6 +371,67 @@ fn eval_primary(
                 Some(val) => Ok(val),
                 None => Err(RuntimeError {
                     message: format!("Runtime error: undefined variable '{}'", name),
+                    span: primary.span.clone(),
+                }),
+            }
+        }
+        PrimaryEnum::This(id) => {
+            // Look up `this` in the environment using the resolver's locals_map to find the
+            //correct depth.
+            let found = if let Some(&depth) = locals_map.get(id) {
+                Environment::get_at(env, depth, "this")
+            } else {
+                // Not in locals_map — evaluate mode with no resolver pass; fall back to
+                // current env.
+                env.borrow().vars.get("this").cloned()
+            };
+            match found {
+                Some(val) => Ok(val),
+                None => Err(RuntimeError {
+                    message: "Runtime error: can't use 'this' outside of a class method".into(),
+                    span: primary.span.clone(),
+                }),
+            }
+        }
+        PrimaryEnum::SuperDot(method_name, id) => {
+            // Look up `super` in the environment using the resolver's locals_map to find the
+            // correct depth, then find the superclass and look up the method on it.  Then
+            // `this` is always one scope shallower than `super`, so look up `this` at depth-1.
+            let (superclass, this_instance) = if let Some(&depth) = locals_map.get(id) {
+                (
+                    Environment::get_at(env, depth, "super"),
+                    Environment::get_at(env, depth - 1, "this"),
+                )
+            } else {
+                // Not in locals_map — evaluate mode with no resolver pass; fall back to
+                // current env.
+                (
+                    env.borrow().vars.get("super").cloned(),
+                    env.borrow().vars.get("this").cloned(),
+                )
+            };
+            match (superclass, this_instance) {
+                (Some(Literal::Class(cls)), Some(Literal::Instance(instance))) => {
+                    if let Some(method) = find_method(&cls, method_name) {
+                        // If `super`, `this`, and the method are all found, bind the method to
+                        // `this` and return it as a callable.
+                        Ok(Literal::UserCallable(bind_method(method, &instance)))
+                    } else {
+                        Err(RuntimeError {
+                            message: format!(
+                                "Runtime error: undefined property '{}' on superclass '{}'",
+                                method_name, cls.name
+                            ),
+                            span: primary.span.clone(),
+                        })
+                    }
+                }
+                (_, None) => Err(RuntimeError {
+                    message: "Runtime error: 'super' must be used with a current instance".into(),
+                    span: primary.span.clone(),
+                }),
+                _ => Err(RuntimeError {
+                    message: "Runtime error: 'super' must refer to a superclass".into(),
                     span: primary.span.clone(),
                 }),
             }

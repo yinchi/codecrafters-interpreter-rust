@@ -1,0 +1,8 @@
+class Foo{
+    hello() {
+        print "Hello from Foo!";
+    }
+}
+
+var bar = Foo();
+bar.hello();

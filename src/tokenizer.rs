@@ -21,7 +21,9 @@ enum TokenizerState {
     Finished,
 }
 
-/// Identifiers cannot be one of these, which have special meaning to the parser.
+/// Identifiers cannot be one of these reserved Lox keywords.
+///
+/// Reserved Lox keywords.
 const RESERVED_KEYWORDS: &[&str] = &[
     "and", "class", "else", "false", "for", "fun", "if", "nil", "or", "print", "return", "super",
     "this", "true", "var", "while",

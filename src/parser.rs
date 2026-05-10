@@ -117,6 +117,53 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<Expression, String
             );
             Ok(Primary::new(PrimaryEnum::Identifier(name, curr_pos), span.clone()).into())
         }
+        "THIS" => {
+            let curr_pos: usize = *pos; // capture the current position for the `this` identifier ID
+            *pos += 1;
+            let span = Span::new(
+                Location::new(token.line, token.col),
+                Location::new(token.line, token.col + token.lexeme.len()),
+            );
+            Ok(Primary::new(PrimaryEnum::This(curr_pos), span).into())
+        }
+        "SUPER" => {
+            let curr_pos: usize = *pos; // capture the current position for the `super` identifier ID
+            *pos += 1;
+
+            // Check for the dot after `super`.
+            let dot_token: &Token = tokens
+                .get(*pos)
+                .ok_or_else(|| "Unexpected end of input.".to_string())?;
+            if dot_token.token_type != "DOT" {
+                return Err(format!(
+                    "[line {}:{}] Syntax error: expected '.' after 'super'.",
+                    dot_token.line, dot_token.col
+                ));
+            }
+            *pos += 1; // consume '.'
+
+            // Check for the method name after the dot.
+            let method_token: &Token = tokens
+                .get(*pos)
+                .ok_or_else(|| "Unexpected end of input.".to_string())?;
+            if method_token.token_type != "IDENTIFIER" {
+                return Err(format!(
+                    "[line {}:{}] Syntax error: expected method name after 'super.'.",
+                    method_token.line, method_token.col
+                ));
+            }
+            let method_name: String = method_token.lexeme.clone();
+            *pos += 1; // consume method name
+
+            let span = Span::new(
+                Location::new(token.line, token.col),
+                Location::new(
+                    method_token.line,
+                    method_token.col + method_token.lexeme.len(),
+                ),
+            );
+            Ok(Primary::new(PrimaryEnum::SuperDot(method_name, curr_pos), span).into())
+        }
         _ => Err(format!(
             "[line {}:{}] Syntax error: unexpected token '{}'.",
             token.line, token.col, token.lexeme
@@ -126,15 +173,13 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<Expression, String
 
 /// Parse calls, or fall down one level (primary) if no call is found.
 ///
-/// `call -> primary ( "(" [ arguments ] ")" )*`
+/// `call -> primary ( "(" [ arguments ] ")"  | "." IDENTIFIER )*`
 fn parse_call(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
     let mut expr: Expression = parse_primary(tokens, pos)?;
 
     // Check for zero or more call suffixes after the primary expression.
-    loop {
-        if let Some(token) = tokens.get(*pos)
-            && token.token_type == "LEFT_PAREN"
-        {
+    while let Some(token) = tokens.get(*pos) {
+        if token.token_type == "LEFT_PAREN" {
             *pos += 1; // consume '('
 
             // Parse arguments if there are any.
@@ -194,10 +239,36 @@ fn parse_call(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
                 ),
                 span.clone(),
             );
+        } else if token.token_type == "DOT" {
+            *pos += 1; // consume '.'
+
+            // Check for the property name after the dot.
+            let property_token: &Token = tokens
+                .get(*pos)
+                .ok_or_else(|| "Unexpected end of input.".to_string())?;
+            if property_token.token_type != "IDENTIFIER" {
+                return Err(format!(
+                    "[line {}:{}] Syntax error: expected property name after '.'.",
+                    property_token.line, property_token.col
+                ));
+            }
+            let property_name: String = property_token.lexeme.clone();
+            *pos += 1; // consume the property name
+
+            let span: Span = Span::new(
+                expr.span.start.clone(),
+                Location::new(
+                    property_token.line,
+                    property_token.col + property_token.lexeme.len(),
+                ),
+            );
+
+            // Nest what we have so far in a Get (the loop allows for chaining)
+            expr = Expression::new(
+                ExpressionEnum::Get(Box::new(expr), property_name),
+                span.clone(),
+            );
         } else {
-            // No "(" means not a call, so break out of the loop and return whatever
-            // we've parsed so far (which will be the primary expression if we never entered
-            // the `if` branch).
             break;
         }
     }
@@ -460,7 +531,7 @@ fn parse_logic_or(tokens: &[Token], pos: &mut usize) -> Result<Expression, Strin
 /// Parse an assignment expression, or fall down one level (logic_or) if no assignment operator is
 /// present.
 ///
-/// `assignment -> IDENTIFIER "=" assignment | logic_or`
+/// `assignment -> (call ".")? IDENTIFIER "=" assignment | logic_or`
 fn parse_assignment(tokens: &[Token], pos: &mut usize) -> Result<Expression, String> {
     let left: Expression = parse_logic_or(tokens, pos)?;
 
@@ -470,20 +541,27 @@ fn parse_assignment(tokens: &[Token], pos: &mut usize) -> Result<Expression, Str
         *pos += 1; // consume '='
         let right = parse_assignment(tokens, pos)?;
 
-        // Check that LHS is an identifier.  If it is, build an Assignment expression.
-        if let ExpressionEnum::Primary(p) = left.expr
-            && let PrimaryEnum::Identifier(_, _id) = p.p
-        {
-            let span: Span = Span::new(left.span.start.clone(), right.span.end.clone());
-            return Ok(Expression::new(
-                ExpressionEnum::Assignment(p, Box::new(right)),
-                span,
-            ));
-        } else {
-            return Err(format!(
-                "[line {}:{}] Invalid assignment target.",
-                token.line, token.col
-            ));
+        match left.expr {
+            ExpressionEnum::Primary(p) if matches!(p.p, PrimaryEnum::Identifier(_, _)) => {
+                let span: Span = Span::new(left.span.start.clone(), right.span.end.clone());
+                return Ok(Expression::new(
+                    ExpressionEnum::Assignment(p, Box::new(right)),
+                    span,
+                ));
+            }
+            ExpressionEnum::Get(object, property_name) => {
+                let span: Span = Span::new(left.span.start.clone(), right.span.end.clone());
+                return Ok(Expression::new(
+                    ExpressionEnum::Set(object, property_name, Box::new(right)),
+                    span,
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "[line {}:{}] Invalid assignment target.",
+                    token.line, token.col
+                ));
+            }
         }
     }
     Ok(left)
@@ -500,11 +578,7 @@ fn parse_expression(tokens: &[Token], pos: &mut usize) -> Result<Expression, Str
 /// is found.
 ///
 /// `exprStmt -> expression ";"` (SEMICOLON token type)
-fn parse_expr_stmt(
-    tokens: &[Token],
-    pos: &mut usize,
-    indent_depth: usize,
-) -> Result<ASTree, String> {
+fn parse_expr_stmt(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
     let expr: Expression = parse_expression(tokens, pos)?;
 
     // Check that the next token is a semicolon, and consume it.
@@ -517,7 +591,6 @@ fn parse_expr_stmt(
             );
             Ok(ASTree::Declaration(Declaration::Statement(
                 Statement::ExprStmt(ExprStmt::new(expr, span)),
-                indent_depth,
             )))
         }
         _ => {
@@ -530,22 +603,16 @@ fn parse_expr_stmt(
 /// Parse a print statement. Triggered only when we see "print", thus no fall-through.
 ///
 /// `printStmt -> "print" exprStmt`
-fn parse_print_stmt(
-    tokens: &[Token],
-    pos: &mut usize,
-    indent_depth: usize,
-) -> Result<ASTree, String> {
+fn parse_print_stmt(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
     let print_token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     *pos += 1; // consume 'print'
 
-    let my_evaluable: ASTree = parse_expr_stmt(tokens, pos, indent_depth)?;
+    let my_evaluable: ASTree = parse_expr_stmt(tokens, pos)?;
     // Check that expr is an expression statement
-    if let ASTree::Declaration(Declaration::Statement(
-        Statement::ExprStmt(expr_stmt),
-        indent_depth,
-    )) = my_evaluable
+    if let ASTree::Declaration(Declaration::Statement(Statement::ExprStmt(expr_stmt))) =
+        my_evaluable
     {
         let span: Span = Span::new(
             Location::new(print_token.line, print_token.col),
@@ -553,7 +620,6 @@ fn parse_print_stmt(
         );
         Ok(ASTree::Declaration(Declaration::Statement(
             Statement::PrintStmt(PrintStmt::new(expr_stmt, span)),
-            indent_depth,
         )))
     } else {
         Err(format!(
@@ -566,11 +632,7 @@ fn parse_print_stmt(
 /// Parse a return statement. Triggered only when we see "return", thus no fall-through.
 ///
 /// `returnStmt     → "return" expression? ";" ;`
-fn parse_return_stmt(
-    tokens: &[Token],
-    pos: &mut usize,
-    indent_depth: usize,
-) -> Result<ASTree, String> {
+fn parse_return_stmt(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
     let return_token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
@@ -607,14 +669,13 @@ fn parse_return_stmt(
 
     Ok(ASTree::Declaration(Declaration::Statement(
         Statement::ReturnStmt(ReturnStmt { value, span }),
-        indent_depth,
     )))
 }
 
 /// Parse a block statement.  Triggered only when we see `{`, thus no fall-through.
 ///
 /// `block → "{" declaration* "}"`
-fn parse_block(tokens: &[Token], pos: &mut usize, indent_depth: usize) -> Result<ASTree, String> {
+fn parse_block(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
     let open_brace_line: usize = tokens[*pos].line;
     let open_brace_col: usize = tokens[*pos].col;
     *pos += 1; // consume '{'
@@ -626,7 +687,6 @@ fn parse_block(tokens: &[Token], pos: &mut usize, indent_depth: usize) -> Result
                 *pos += 1; // consume '}'
                 return Ok(ASTree::Declaration(Declaration::Statement(
                     Statement::Block(decls),
-                    indent_depth,
                 )));
             }
             Some(token) if token.token_type == "EOF" => {
@@ -641,7 +701,7 @@ fn parse_block(tokens: &[Token], pos: &mut usize, indent_depth: usize) -> Result
                     open_brace_line, open_brace_col
                 ));
             }
-            _ => match parse_declaration(tokens, pos, indent_depth + 1)? {
+            _ => match parse_declaration(tokens, pos)? {
                 ASTree::Declaration(decl) => decls.push(decl),
                 ASTree::Expr(_) => {
                     // Bare expression found inside block.
@@ -675,7 +735,7 @@ fn parse_block(tokens: &[Token], pos: &mut usize, indent_depth: usize) -> Result
 /// Parse an if statement. Triggered only when we see `if`, thus no fall-through.
 ///
 /// `ifStmt         → "if" "(" expression ")" statement ( "else" statement )? ;`
-fn parse_if_stmt(tokens: &[Token], pos: &mut usize, indent_depth: usize) -> Result<ASTree, String> {
+fn parse_if_stmt(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
     let if_pos: usize = *pos;
     *pos += 1; // consume 'if'
 
@@ -705,66 +765,76 @@ fn parse_if_stmt(tokens: &[Token], pos: &mut usize, indent_depth: usize) -> Resu
     }
     *pos += 1; // consume ')'
 
-    let then_branch: Box<Statement> = Box::new(
-        match parse_statement(tokens, pos, indent_depth + 1)? {
-            ASTree::Declaration(Declaration::Statement(stmt, _)) => stmt,
-            ASTree::Declaration(Declaration::VarDecl(..)) => {
-                return Err(format!(
-                    "[line {}:{}] Syntax error: variable declaration not allowed directly inside 'if' statement. Use a block to create an inner scope.",
-                    tokens[*pos - 1].line,
-                    tokens[*pos - 1].col
-                ));
-            }
-            ASTree::Declaration(Declaration::FunDecl(..)) => {
-                return Err(format!(
-                    "[line {}:{}] Syntax error: function declaration not allowed directly inside 'if' statement. Use a block to create an inner scope.",
-                    tokens[*pos - 1].line,
-                    tokens[*pos - 1].col
-                ));
-            }
-            ASTree::Expr(_) => {
-                return Err(format!(
-                    "[line {}:{}] Syntax error: expected statement after if condition.",
-                    tokens[*pos - 1].line,
-                    tokens[*pos - 1].col
-                ));
-            }
-            ASTree::Program(_) => unreachable!(),
-        },
-    );
+    let then_branch: Box<Statement> = Box::new(match parse_statement(tokens, pos)? {
+        ASTree::Declaration(Declaration::Statement(stmt)) => stmt,
+        ASTree::Declaration(Declaration::ClassDecl(..)) => {
+            return Err(format!(
+                "[line {}:{}] Syntax error: class declaration not allowed directly inside 'if' statement. Use a block to create an inner scope.",
+                tokens[*pos - 1].line,
+                tokens[*pos - 1].col
+            ));
+        }
+        ASTree::Declaration(Declaration::VarDecl(..)) => {
+            return Err(format!(
+                "[line {}:{}] Syntax error: variable declaration not allowed directly inside 'if' statement. Use a block to create an inner scope.",
+                tokens[*pos - 1].line,
+                tokens[*pos - 1].col
+            ));
+        }
+        ASTree::Declaration(Declaration::FunDecl(..)) => {
+            return Err(format!(
+                "[line {}:{}] Syntax error: function declaration not allowed directly inside 'if' statement. Use a block to create an inner scope.",
+                tokens[*pos - 1].line,
+                tokens[*pos - 1].col
+            ));
+        }
+        ASTree::Expr(_) => {
+            return Err(format!(
+                "[line {}:{}] Syntax error: expected statement after if condition.",
+                tokens[*pos - 1].line,
+                tokens[*pos - 1].col
+            ));
+        }
+        ASTree::Program(_) => unreachable!(),
+    });
 
     // Check for optional "else" branch and consume if present.
     let else_branch: Option<Box<Statement>> = if let Some(token) = tokens.get(*pos)
         && token.token_type == "ELSE"
     {
         *pos += 1; // consume 'else'
-        Some(Box::new(
-            match parse_statement(tokens, pos, indent_depth + 1)? {
-                ASTree::Declaration(Declaration::Statement(stmt, _)) => stmt,
-                ASTree::Declaration(Declaration::VarDecl(..)) => {
-                    return Err(format!(
-                        "[line {}:{}] Syntax error: variable declaration not allowed directly inside 'else' statement. Use a block to create an inner scope.",
-                        tokens[*pos - 1].line,
-                        tokens[*pos - 1].col
-                    ));
-                }
-                ASTree::Declaration(Declaration::FunDecl(..)) => {
-                    return Err(format!(
-                        "[line {}:{}] Syntax error: function declaration not allowed directly inside 'else' statement. Use a block to create an inner scope.",
-                        tokens[*pos - 1].line,
-                        tokens[*pos - 1].col
-                    ));
-                }
-                ASTree::Expr(_) => {
-                    return Err(format!(
-                        "[line {}:{}] Syntax error: expected statement after 'else'.",
-                        tokens[*pos - 1].line,
-                        tokens[*pos - 1].col
-                    ));
-                }
-                ASTree::Program(_) => unreachable!(),
-            },
-        ))
+        Some(Box::new(match parse_statement(tokens, pos)? {
+            ASTree::Declaration(Declaration::Statement(stmt)) => stmt,
+            ASTree::Declaration(Declaration::VarDecl(..)) => {
+                return Err(format!(
+                    "[line {}:{}] Syntax error: variable declaration not allowed directly inside 'else' statement. Use a block to create an inner scope.",
+                    tokens[*pos - 1].line,
+                    tokens[*pos - 1].col
+                ));
+            }
+            ASTree::Declaration(Declaration::ClassDecl(..)) => {
+                return Err(format!(
+                    "[line {}:{}] Syntax error: class declaration not allowed directly inside 'else' statement. Use a block to create an inner scope.",
+                    tokens[*pos - 1].line,
+                    tokens[*pos - 1].col
+                ));
+            }
+            ASTree::Declaration(Declaration::FunDecl(..)) => {
+                return Err(format!(
+                    "[line {}:{}] Syntax error: function declaration not allowed directly inside 'else' statement. Use a block to create an inner scope.",
+                    tokens[*pos - 1].line,
+                    tokens[*pos - 1].col
+                ));
+            }
+            ASTree::Expr(_) => {
+                return Err(format!(
+                    "[line {}:{}] Syntax error: expected statement after 'else'.",
+                    tokens[*pos - 1].line,
+                    tokens[*pos - 1].col
+                ));
+            }
+            ASTree::Program(_) => unreachable!(),
+        }))
     } else {
         None
     };
@@ -777,25 +847,14 @@ fn parse_if_stmt(tokens: &[Token], pos: &mut usize, indent_depth: usize) -> Resu
     );
 
     Ok(ASTree::Declaration(Declaration::Statement(
-        Statement::IfStmt(IfStmt::new(
-            condition,
-            then_branch,
-            else_branch,
-            span,
-            indent_depth,
-        )),
-        indent_depth,
+        Statement::IfStmt(IfStmt::new(condition, then_branch, else_branch, span)),
     )))
 }
 
 /// Parse a while statement. Triggered only when we see `while`, thus no fall-through.
 ///
 /// `whileStmt      → "while" "(" expression ")" statement ;`
-fn parse_while_stmt(
-    tokens: &[Token],
-    pos: &mut usize,
-    indent_depth: usize,
-) -> Result<ASTree, String> {
+fn parse_while_stmt(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
     let while_pos = *pos;
     *pos += 1; // consume 'while'
 
@@ -827,8 +886,15 @@ fn parse_while_stmt(
 
     // Parse the body of the while loop as a statement.
     // Note that in Lox, any statement type is allowed as the loop body.
-    let body = Box::new(match parse_statement(tokens, pos, indent_depth + 1)? {
-        ASTree::Declaration(Declaration::Statement(stmt, _)) => stmt,
+    let body = Box::new(match parse_statement(tokens, pos)? {
+        ASTree::Declaration(Declaration::Statement(stmt)) => stmt,
+        ASTree::Declaration(Declaration::ClassDecl(..)) => {
+            return Err(format!(
+                "[line {}:{}] Syntax error: class declaration not allowed directly inside 'while' statement. Use a block to create an inner scope.",
+                tokens[*pos - 1].line,
+                tokens[*pos - 1].col
+            ));
+        }
         ASTree::Declaration(Declaration::VarDecl(..)) => {
             return Err(format!(
                 "[line {}:{}] Syntax error: variable declaration not allowed directly inside 'while' statement. Use a block to create an inner scope.",
@@ -861,8 +927,7 @@ fn parse_while_stmt(
     );
 
     Ok(ASTree::Declaration(Declaration::Statement(
-        Statement::WhileStmt(WhileStmt::new(condition, body, span, indent_depth)),
-        indent_depth,
+        Statement::WhileStmt(WhileStmt::new(condition, body, span)),
     )))
 }
 
@@ -871,7 +936,7 @@ fn parse_while_stmt(
 ///
 /// Inserted into the AST as:
 /// (block
-///     (<dset! or set!> <name> <value>)?  ; loop variable declaration or assignment
+///     (<dassign! or assign!> <name> <value>)?  ; loop variable declaration or assignment
 ///     (while
 ///         <condition or true(default)>   ; optional loop condition, e.g. true or (< i 10)
 ///         (block
@@ -882,11 +947,7 @@ fn parse_while_stmt(
 /// )
 ///
 /// `forStmt         → "for" "(" ( varDecl | exprStmt | ";" ) expression? ";" expression? ")" statement ;`
-fn parse_for_stmt(
-    tokens: &[Token],
-    pos: &mut usize,
-    indent_depth: usize,
-) -> Result<ASTree, String> {
+fn parse_for_stmt(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
     let for_pos = *pos;
     *pos += 1; // consume 'for'
 
@@ -908,9 +969,9 @@ fn parse_for_stmt(
             *pos += 1; // consume ';'
             None
         } else if token.token_type == "VAR" {
-            Some(parse_var_decl(tokens, pos, indent_depth + 1)?)
+            Some(parse_var_decl(tokens, pos)?)
         } else {
-            Some(parse_expr_stmt(tokens, pos, indent_depth + 1)?)
+            Some(parse_expr_stmt(tokens, pos)?)
         }
     } else {
         return Err("Unexpected end of input.".to_string());
@@ -977,8 +1038,15 @@ fn parse_for_stmt(
     *pos += 1; // consume ')'
 
     // Parse the body of the for loop as a statement.
-    let body: Box<Statement> = Box::new(match parse_statement(tokens, pos, indent_depth + 1)? {
-        ASTree::Declaration(Declaration::Statement(stmt, _)) => stmt,
+    let body: Box<Statement> = Box::new(match parse_statement(tokens, pos)? {
+        ASTree::Declaration(Declaration::Statement(stmt)) => stmt,
+        ASTree::Declaration(Declaration::ClassDecl(..)) => {
+            return Err(format!(
+                "[line {}:{}] Syntax error: class declaration not allowed directly inside 'for' statement. Use a block to create an inner scope.",
+                tokens[*pos - 1].line,
+                tokens[*pos - 1].col
+            ));
+        }
         ASTree::Declaration(Declaration::VarDecl(..)) => {
             return Err(format!(
                 "[line {}:{}] Syntax error: variable declaration not allowed directly inside 'for' statement body. Use a block to create an inner scope.",
@@ -1017,11 +1085,8 @@ fn parse_for_stmt(
     let desugared_body: Statement = if let Some(increment_expr) = increment {
         let new_span = increment_expr.span.clone();
         Statement::Block(vec![
-            Declaration::Statement(*body, indent_depth + 1),
-            Declaration::Statement(
-                Statement::ExprStmt(ExprStmt::new(increment_expr, new_span)),
-                indent_depth + 1,
-            ),
+            Declaration::Statement(*body),
+            Declaration::Statement(Statement::ExprStmt(ExprStmt::new(increment_expr, new_span))),
         ])
     } else {
         // No increment, so the body stays the same.
@@ -1041,57 +1106,42 @@ fn parse_for_stmt(
         }),
         Box::new(desugared_body),
         span.clone(),
-        indent_depth + 1,
     ));
 
     // If there is an initializer, the desugared for loop is a block containing the initializer.
     // Otherwise, it's a block containing just the desugared while loop.
     let desugared_for: Statement = if let Some(init) = init_decl {
-        Statement::Block(vec![
-            init,
-            Declaration::Statement(desugared_while, indent_depth + 1),
-        ])
+        Statement::Block(vec![init, Declaration::Statement(desugared_while)])
     } else {
-        Statement::Block(vec![Declaration::Statement(
-            desugared_while,
-            indent_depth + 1,
-        )])
+        Statement::Block(vec![Declaration::Statement(desugared_while)])
     };
 
-    Ok(ASTree::Declaration(Declaration::Statement(
-        desugared_for,
-        indent_depth,
-    )))
+    Ok(ASTree::Declaration(Declaration::Statement(desugared_for)))
 }
 
-/// Parse a statement, which can be a block, print statement, while statement, or expression
-/// statement. Fall-through to raw expressions from `parse_expr_stmt` if we see an expression
-/// that isn't followed by a semicolon.
+/// Parse a statement. Fall-through to raw expressions from `parse_expr_stmt` if we see an
+///  expression that isn't followed by a semicolon.
 ///
 /// `statement → block | ifStmt | printStmt | returnStmt | whileStmt | exprStmt`
-fn parse_statement(
-    tokens: &[Token],
-    pos: &mut usize,
-    indent_depth: usize,
-) -> Result<ASTree, String> {
+fn parse_statement(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
     let token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     if token.token_type == "LEFT_BRACE" {
-        parse_block(tokens, pos, indent_depth)
+        parse_block(tokens, pos)
     } else if token.token_type == "IF" {
-        parse_if_stmt(tokens, pos, indent_depth)
+        parse_if_stmt(tokens, pos)
     } else if token.token_type == "WHILE" {
-        parse_while_stmt(tokens, pos, indent_depth)
+        parse_while_stmt(tokens, pos)
     } else if token.token_type == "FOR" {
-        parse_for_stmt(tokens, pos, indent_depth)
+        parse_for_stmt(tokens, pos)
     } else if token.token_type == "PRINT" {
-        parse_print_stmt(tokens, pos, indent_depth)
+        parse_print_stmt(tokens, pos)
     } else if token.token_type == "RETURN" {
-        parse_return_stmt(tokens, pos, indent_depth)
+        parse_return_stmt(tokens, pos)
     } else {
         // No match for any other statement type, so try parsing an expression statement.
-        parse_expr_stmt(tokens, pos, indent_depth)
+        parse_expr_stmt(tokens, pos)
     }
 }
 
@@ -1099,11 +1149,7 @@ fn parse_statement(
 /// with the "var" token.
 ///
 /// `varDecl -> "var" IDENTIFIER ( "=" expression )? ";"`
-fn parse_var_decl(
-    tokens: &[Token],
-    pos: &mut usize,
-    indent_depth: usize,
-) -> Result<ASTree, String> {
+fn parse_var_decl(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
     // Handle "var" token
     let var_pos: usize = *pos;
     *pos += 1; // consume 'var'
@@ -1160,42 +1206,32 @@ fn parse_var_decl(
             semicolon_token.col + semicolon_token.lexeme.len(),
         ),
     );
-    Ok(ASTree::Declaration(Declaration::VarDecl(
-        VarDecl::new(
-            name,
-            Location::new(name_token.line, name_token.col),
-            initializer,
-            span,
-        ),
-        indent_depth,
-    )))
+    Ok(ASTree::Declaration(Declaration::VarDecl(VarDecl::new(
+        name,
+        Location::new(name_token.line, name_token.col),
+        initializer,
+        span,
+    ))))
 }
 
-/// Parse a function declaration. No fall-through, since function declarations must start
-/// with the "fun" token.
+/// Parse a function. Triggered only when we see `fun` or inside a class definition
+/// (where it is the only thing allowed), thus no fall-through.
 ///
-/// `funDecl -> "fun" IDENTIFIER "(" parameters? ")" block`
+/// `function -> IDENTIFIER "(" parameters? ")" block`
 /// `parameters -> IDENTIFIER ( "," IDENTIFIER )*`
-fn parse_fun_decl(
-    tokens: &[Token],
-    pos: &mut usize,
-    indent_depth: usize,
-) -> Result<ASTree, String> {
-    // Handle "fun" token
-    let fun_pos = *pos;
-    *pos += 1; // consume 'fun'
-
+fn parse_function(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
     // Handle function name
+    let name_pos: usize = *pos;
     let name_token: &Token = tokens.get(*pos).ok_or_else(|| {
-        let fun_tok = &tokens[fun_pos];
         format!(
-            "[line {}:{}] Syntax error: expected function name after 'fun'.",
-            fun_tok.line, fun_tok.col
+            "[line {}:{}] Syntax error: expected function name, but found EOF.",
+            tokens[*pos - 1].line,
+            tokens[*pos - 1].col
         )
     })?;
     if name_token.token_type != "IDENTIFIER" {
         return Err(format!(
-            "[line {}:{}] Syntax error: expected function name after 'fun', but found '{}'.",
+            "[line {}:{}] Syntax error: expected function name, but found '{}'.",
             name_token.line, name_token.col, name_token.lexeme
         ));
     }
@@ -1258,9 +1294,9 @@ fn parse_fun_decl(
     }
     *pos += 1; // consume ')'
 
-    // Parse the function body, which is a block statement.
-    let body: Statement = match parse_block(tokens, pos, indent_depth + 1)? {
-        ASTree::Declaration(Declaration::Statement(stmt, _)) => {
+    // Parse the function body using `parse_block`; function bodies must be blocks.
+    let body: Statement = match parse_block(tokens, pos)? {
+        ASTree::Declaration(Declaration::Statement(stmt)) => {
             // Check that the statement is a block statement, since function bodies must be blocks.
             match stmt {
                 Statement::Block(_) => stmt,
@@ -1272,6 +1308,13 @@ fn parse_fun_decl(
                     ));
                 }
             }
+        }
+        ASTree::Declaration(Declaration::ClassDecl(..)) => {
+            return Err(format!(
+                "[line {}:{}] Syntax error: expected block statement as function body, but found class declaration.",
+                tokens[*pos - 1].line,
+                tokens[*pos - 1].col
+            ));
         }
         ASTree::Declaration(Declaration::VarDecl(..)) => {
             return Err(format!(
@@ -1298,33 +1341,150 @@ fn parse_fun_decl(
     };
 
     let span: Span = Span::new(
-        Location::new(tokens[fun_pos].line, tokens[fun_pos].col),
+        Location::new(tokens[name_pos].line, tokens[name_pos].col),
         Location::new(tokens[*pos - 1].line, tokens[*pos - 1].col),
     );
-    Ok(ASTree::Declaration(Declaration::FunDecl(
-        FunDecl::new(name, parameters, Rc::new(body), span),
-        indent_depth,
-    )))
+    Ok(ASTree::Declaration(Declaration::FunDecl(FunDecl::new(
+        name,
+        parameters,
+        Rc::new(body),
+        span,
+    ))))
 }
 
-/// Parse a declaration, which can be a variable declaration, a function declaration,
-/// or a statement.
+/// Parse a function.
 ///
-/// `declaration → fun Decl | varDecl | statement`
-fn parse_declaration(
-    tokens: &[Token],
-    pos: &mut usize,
-    indent_depth: usize,
-) -> Result<ASTree, String> {
+/// `funDecl         → "fun" function ;`
+fn parse_fun_decl(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
+    *pos += 1; // consume 'fun'
+
+    match parse_function(tokens, pos)? {
+        ASTree::Declaration(Declaration::FunDecl(fun_decl)) => {
+            Ok(ASTree::Declaration(Declaration::FunDecl(fun_decl)))
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Parse a class declaration. No fall-through, since class declarations must start with the
+/// "class" token.
+///
+/// `classDecl        → "class" IDENTIFIER ("<" IDENTIFIER)? "{" function* "}" ;`
+fn parse_class_decl(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
+    // Handle "class" token
+    let class_pos = *pos;
+    *pos += 1; // consume 'class'
+
+    // Handle class name
+    let name_token: &Token = tokens.get(*pos).ok_or_else(|| {
+        let class_tok = &tokens[class_pos];
+        format!(
+            "[line {}:{}] Syntax error: expected class name after 'class'.",
+            class_tok.line, class_tok.col
+        )
+    })?;
+    if name_token.token_type != "IDENTIFIER" {
+        return Err(format!(
+            "[line {}:{}] Syntax error: expected class name after 'class', but found '{}'.",
+            name_token.line, name_token.col, name_token.lexeme
+        ));
+    }
+    let name: String = name_token.lexeme.clone();
+    *pos += 1; // consume the class name
+
+    // Check for '<' after the class name, followed by the superclass name.
+    let superclass: Option<(String, usize)> = if let Some(token) = tokens.get(*pos)
+        && token.token_type == "LESS"
+    {
+        *pos += 1; // consume '<'
+        let superclass_token: &Token = tokens.get(*pos).ok_or_else(|| {
+            format!(
+                "[line {}:{}] Syntax error: expected superclass name after '<' in class declaration, but found EOF.",
+                tokens[*pos - 1].line,
+                tokens[*pos - 1].col
+            )
+        })?;
+        if superclass_token.token_type != "IDENTIFIER" {
+            return Err(format!(
+                "[line {}:{}] Syntax error: expected superclass name after '<' in class declaration, but found '{}'.",
+                superclass_token.line, superclass_token.col, superclass_token.lexeme
+            ));
+        }
+        let superclass_name: String = superclass_token.lexeme.clone();
+        let superclass_pos = *pos; // save the position of the superclass name for the AST node
+        *pos += 1; // consume the superclass name
+        Some((superclass_name, superclass_pos))
+    } else {
+        None
+    };
+
+    // Check for '{'
+    let left_brace_token: &Token = tokens
+        .get(*pos)
+        .ok_or_else(|| "Unexpected end of input.".to_string())?;
+    if left_brace_token.token_type != "LEFT_BRACE" {
+        return Err(format!(
+            "[line {}:{}] Syntax error: expected '{{' after class declaration header, but found '{}'.",
+            left_brace_token.line, left_brace_token.col, left_brace_token.lexeme
+        ));
+    }
+    *pos += 1; // consume '{'
+
+    // Parse zero or more class functions until we see a '}' token.
+    let mut methods: Vec<FunDecl> = Vec::new();
+
+    loop {
+        if let Some(token) = tokens.get(*pos) {
+            if token.token_type == "RIGHT_BRACE" {
+                break; // end of method list
+            } else {
+                match parse_function(tokens, pos)? {
+                    ASTree::Declaration(Declaration::FunDecl(fun_decl)) => {
+                        methods.push(fun_decl);
+                    }
+                    _ => {
+                        return Err(format!(
+                            "[line {}:{}] Syntax error: expected method declaration in class body, but found '{}'.",
+                            token.line, token.col, token.lexeme
+                        ));
+                    }
+                }
+            }
+        } else {
+            let last = &tokens[(*pos).saturating_sub(1)];
+            return Err(format!(
+                "[line {}:{}] Syntax error: unexpected EOF in class body.",
+                last.line, last.col
+            ));
+        }
+    }
+    *pos += 1; // consume '}'
+
+    let span: Span = Span::new(
+        Location::new(tokens[class_pos].line, tokens[class_pos].col),
+        Location::new(tokens[*pos - 1].line, tokens[*pos - 1].col),
+    );
+    Ok(ASTree::Declaration(Declaration::ClassDecl(ClassDecl::new(
+        name, superclass, methods, span,
+    ))))
+}
+
+/// Parse a declaration, which can be a class declaration, a function declaration,
+/// a variable declaration, or a statement.
+///
+/// `declaration → classDecl | funDecl | varDecl | statement`
+fn parse_declaration(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
     let token: &Token = tokens
         .get(*pos)
         .ok_or_else(|| "Unexpected end of input.".to_string())?;
     if token.token_type == "VAR" {
-        parse_var_decl(tokens, pos, indent_depth)
+        parse_var_decl(tokens, pos)
     } else if token.token_type == "FUN" {
-        parse_fun_decl(tokens, pos, indent_depth)
+        parse_fun_decl(tokens, pos)
+    } else if token.token_type == "CLASS" {
+        parse_class_decl(tokens, pos)
     } else {
-        parse_statement(tokens, pos, indent_depth)
+        parse_statement(tokens, pos)
     }
 }
 
@@ -1352,7 +1512,7 @@ fn parse_program(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
         }
         // Since not EOF, consume a declaration.  Note scope-depth is 1-based to
         // match indentation of top-level declarations in parser output (inside `prog`).
-        match parse_declaration(tokens, pos, 1)? {
+        match parse_declaration(tokens, pos)? {
             ASTree::Declaration(decl) => declarations.push(decl),
             ASTree::Expr(_) => {
                 // parse_declaration returned Ok(Expr)
@@ -1380,7 +1540,7 @@ fn parse_program(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {
 /// The top-level parse function, which will be called from main.rs.
 pub fn parse(tokens: &[Token]) -> Result<ASTree, String> {
     let mut pos = 0;
-    // Try to parse a full program first. If that fails, try remove the EOF token and
+    // Try to parse a full program first. If that fails, try removing the EOF token and
     // parse a single expression.  We do not consider the statement level since a single statement
     // with EOF is already a valid program.
     match parse_program(tokens, &mut pos) {

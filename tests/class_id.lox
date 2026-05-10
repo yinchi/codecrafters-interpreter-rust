@@ -1,0 +1,8 @@
+class Foo {}
+var outer = Foo;
+{
+    class Foo {}          // a completely different class
+    print Foo == Foo;     // true
+    print outer == outer; // true
+    print outer == Foo;   // false
+}

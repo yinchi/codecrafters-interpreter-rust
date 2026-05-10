@@ -1,6 +1,16 @@
 use std::fmt::{Debug, Display};
+use std::rc::Rc;
 
 use super::*;
+
+/// Indent a multiline string by the given number of spaces.
+fn indent_string(s: &str, indent: usize) -> String {
+    let indent_str = " ".repeat(indent);
+    s.lines()
+        .map(|line| format!("{}{}", indent_str, line))
+        .collect::<Vec<String>>()
+        .join("\n")
+}
 
 impl From<Literal> for PrimaryEnum {
     /// Cast from Literal to PrimaryEnum.
@@ -53,6 +63,16 @@ impl From<ExpressionEnum> for Expression {
             ExpressionEnum::Call(callee, args) => {
                 Span::new(callee.span.start.clone(), args.span.end.clone())
             }
+
+            // Full span is `<object>.<property>`
+            ExpressionEnum::Get(object, _property) => {
+                Span::new(object.span.start.clone(), object.span.end.clone())
+            }
+
+            // Full span is `<object>.<property> = <value>`
+            ExpressionEnum::Set(object, _property, value) => {
+                Span::new(object.span.start.clone(), value.span.end.clone())
+            }
         };
         Expression::new(e_enum, span)
     }
@@ -65,10 +85,31 @@ impl From<Primary> for Expression {
     }
 }
 
-impl PartialEq for UserCallable {
+impl PartialEq for Literal {
     fn eq(&self, other: &Self) -> bool {
-        // Same function declaration (by Rc identity)?
-        Rc::ptr_eq(&self.decl, &other.decl)
+        match (self, other) {
+            (Literal::Number(n1), Literal::Number(n2)) => n1 == n2,
+            (Literal::String(s1), Literal::String(s2)) => s1 == s2,
+
+            (Literal::True, Literal::True)
+            | (Literal::False, Literal::False)
+            | (Literal::Nil, Literal::Nil) => true,
+
+            // Class identity by Rc pointer equality
+            (Literal::Class(c1), Literal::Class(c2)) => Rc::ptr_eq(&c1.id, &c2.id),
+
+            // User callables are equal if they have the same function declaration (by Rc identity).
+            (Literal::UserCallable(f1), Literal::UserCallable(f2)) => {
+                Rc::ptr_eq(&f1.decl, &f2.decl)
+            }
+
+            // Native callables are equal if they have the same name (since they reference the same built-in function).
+            (Literal::NativeCallable(f1), Literal::NativeCallable(f2)) => f1.name == f2.name,
+
+            // Compare instance identity by Rc pointer equality
+            (Literal::Instance(i1), Literal::Instance(i2)) => Rc::ptr_eq(i1, i2),
+            _ => false, // Different variants are not equal
+        }
     }
 }
 
@@ -80,11 +121,13 @@ impl Display for Literal {
         match self {
             Literal::Number(n) => write!(f, "{n}"),
             Literal::String(s) => write!(f, "{}", s),
+            Literal::Class(class) => write!(f, "{}", class.name),
             Literal::True => write!(f, "true"),
             Literal::False => write!(f, "false"),
             Literal::Nil => write!(f, "nil"),
             Literal::UserCallable(callable) => write!(f, "<fn {}>", callable.decl.name),
             Literal::NativeCallable(callable) => write!(f, "<native fn {}>", callable.name),
+            Literal::Instance(instance) => write!(f, "{} instance", instance.borrow().class.name),
         }
     }
 }
@@ -106,7 +149,8 @@ impl Debug for Program {
         // )
         result.push_str("(prog\n");
         for decl in &self.declarations {
-            result.push_str(&format!("{:?}\n", decl));
+            let decl_str = format!("{:?}", decl);
+            result.push_str(&format!("{}\n", indent_string(&decl_str, 2)));
         }
         result.push_str(")\n");
         write!(f, "{}", result)
@@ -116,16 +160,48 @@ impl Debug for Program {
 impl Debug for Declaration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Declaration::FunDecl(fun_decl, indent_depth) => {
-                write!(f, "{}{:?}", " ".repeat(2 * indent_depth), fun_decl)
+            Declaration::ClassDecl(class_decl) => {
+                write!(f, "{:?}", class_decl)
             }
-            Declaration::VarDecl(var_decl, indent_depth) => {
-                write!(f, "{}{:?}", " ".repeat(2 * indent_depth), var_decl)
+            Declaration::FunDecl(fun_decl) => {
+                write!(f, "{:?}", fun_decl)
             }
-            Declaration::Statement(stmt, indent_depth) => {
-                write!(f, "{}{:?}", " ".repeat(2 * indent_depth), stmt)
+            Declaration::VarDecl(var_decl) => {
+                write!(f, "{:?}", var_decl)
+            }
+            Declaration::Statement(stmt) => {
+                write!(f, "{:?}", stmt)
             }
         }
+    }
+}
+
+impl Debug for ClassDecl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Opening `(class <name>`
+        let mut result = if let Some((superclass_name, _)) = &self.superclass {
+            // (subclass <name> <superclass> ...)
+            format!("(subclass {} {}", self.name, superclass_name)
+        } else {
+            // (class <name> ...)
+            format!("(class {}", self.name)
+        };
+
+        for method in &self.methods {
+            // Each method on a new line, indented by 2 spaces.
+            let method_str = format!("{:?}", method);
+            result.push_str(format!("\n{}", indent_string(&method_str, 2)).as_str());
+        }
+
+        // Newline before closing `)` if there are methods.
+        if !self.methods.is_empty() {
+            result.push('\n');
+        }
+
+        // Closing `)`.
+        result.push(')');
+
+        write!(f, "{}", result)
     }
 }
 
@@ -137,15 +213,22 @@ impl Debug for FunDecl {
             .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>()
             .join(" ");
-        write!(f, "(fn! {} ({}) {:?})", self.name, params_str, self.body)
+
+        let block_str = format!("{:?}", self.body);
+        let indented_block_str = indent_string(&block_str, 2);
+        write!(
+            f,
+            "(fn! {} ({})\n{}\n)",
+            self.name, params_str, indented_block_str
+        )
     }
 }
 
 impl Debug for VarDecl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.initializer {
-            // dset! if there's an initializer, otherwise just decl!.
-            Some(expr) => write!(f, "(dset! {} {:?})", self.name, expr),
+            // dassign! if there's an initializer, otherwise just decl!.
+            Some(expr) => write!(f, "(dassign! {} {:?})", self.name, expr),
             None => write!(f, "(decl! {})", self.name),
         }
     }
@@ -170,24 +253,24 @@ impl Debug for Statement {
             //   )
             // )
             Statement::IfStmt(if_stmt) => {
-                let branch_indent = " ".repeat(2 * (if_stmt.indent_depth + 1));
-                let close_indent = " ".repeat(2 * if_stmt.indent_depth);
-                let mut result = format!(
-                    "(if {:?}\n{}{:?}",
-                    if_stmt.condition, branch_indent, if_stmt.then_branch
-                );
+                let mut result = format!("(if {:?}", if_stmt.condition);
+                let then_branch_str = format!("{:?}", if_stmt.then_branch);
+                let indented_then_branch_str = indent_string(&then_branch_str, 2);
+                result.push_str(&format!("\n{}", indented_then_branch_str));
+
                 if let Some(else_branch) = &if_stmt.else_branch {
-                    result.push_str(&format!("\n{}{:?}", branch_indent, else_branch));
+                    let else_branch_str = format!("{:?}", else_branch);
+                    let indented_else_branch_str = indent_string(&else_branch_str, 2);
+                    result.push_str(&format!("\n{}", indented_else_branch_str));
                 }
-                result.push_str(&format!("\n{})", close_indent));
+                result.push_str("\n)");
                 write!(f, "{}", result)
             }
             Statement::WhileStmt(while_stmt) => {
-                let branch_indent = " ".repeat(2 * (while_stmt.indent_depth + 1));
-                let close_indent = " ".repeat(2 * while_stmt.indent_depth);
                 let result = format!(
-                    "(while {:?}\n{}{:?}\n{})",
-                    while_stmt.condition, branch_indent, while_stmt.body, close_indent
+                    "(while {:?}\n{:?}\n)",
+                    while_stmt.condition,
+                    indent_string(&format!("{:?}", while_stmt.body), 2)
                 );
                 write!(f, "{}", result)
             }
@@ -197,25 +280,16 @@ impl Debug for Statement {
                 // Push each declaration in the block on a new line, indented by 2 spaces per
                 //indent depth.
                 for decl in decls {
-                    result.push_str(&format!("\n{:?}", decl));
+                    let decl_str = format!("{:?}", decl);
+                    result.push_str(&format!("\n{}", indent_string(&decl_str, 2)));
                 }
 
-                // Infer the indent depth of the block from the first declaration (if any) to
-                // determine how much to indent the closing parenthesis.
-                if let Some(first_decl) = decls.first() {
-                    let inner_depth = match first_decl {
-                        Declaration::VarDecl(_, d)
-                        | Declaration::Statement(_, d)
-                        | Declaration::FunDecl(_, d) => *d,
-                    };
-                    result.push_str(&format!(
-                        "\n{})",
-                        " ".repeat(2 * inner_depth.saturating_sub(1))
-                    ));
-                } else {
-                    // No declarations, entire string is just "(block)" with no newlines.
-                    result.push(')');
+                // Newline before closing `)` if there are declarations.
+                if !decls.is_empty() {
+                    result.push('\n');
                 }
+
+                result.push(')');
                 write!(f, "{}", result)
             }
         }
@@ -261,7 +335,9 @@ impl Debug for ExpressionEnum {
             | ExpressionEnum::Logical(op, left, right) => {
                 write!(f, "({:?} {:?} {:?})", op, left, right)
             }
-            ExpressionEnum::Assignment(name, value) => write!(f, "(set! {:?} {:?})", name, value),
+            ExpressionEnum::Assignment(name, value) => {
+                write!(f, "(assign! {:?} {:?})", name, value)
+            }
             ExpressionEnum::Call(callee, args) => {
                 let mut result: String = format!("({:?}", callee);
                 for arg in &args.args {
@@ -269,6 +345,10 @@ impl Debug for ExpressionEnum {
                 }
                 result.push(')');
                 write!(f, "{}", result)
+            }
+            ExpressionEnum::Get(object, property) => write!(f, "(get {:?} {:?})", object, property),
+            ExpressionEnum::Set(object, property, value) => {
+                write!(f, "(set! {:?} {:?} {:?})", object, property, value)
             }
         }
     }
@@ -286,6 +366,8 @@ impl Debug for PrimaryEnum {
             PrimaryEnum::Literal(lit) => write!(f, "{:?}", lit),
             PrimaryEnum::Grouping(expr) => write!(f, "(group {:?})", expr),
             PrimaryEnum::Identifier(name, _id) => write!(f, "{}", name),
+            PrimaryEnum::This(_id) => write!(f, "this"),
+            PrimaryEnum::SuperDot(method_name, _id) => write!(f, "super.{}", method_name),
         }
     }
 }
@@ -306,11 +388,13 @@ impl Debug for Literal {
                 }
             }
             Literal::String(s) => write!(f, "{}", s),
+            Literal::Class(class) => write!(f, "{}", class.name),
             Literal::True => write!(f, "true"),
             Literal::False => write!(f, "false"),
             Literal::Nil => write!(f, "nil"),
             Literal::UserCallable(callable) => write!(f, "<fn {}>", callable.decl.name),
             Literal::NativeCallable(callable) => write!(f, "<native fn {}>", callable.name),
+            Literal::Instance(instance) => write!(f, "<{} instance>", instance.borrow().class.name),
         }
     }
 }

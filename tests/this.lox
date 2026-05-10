@@ -1,0 +1,9 @@
+class Foo{
+    hello() {
+        print this.baz;
+    }
+}
+
+var bar = Foo();
+bar.baz = 42;
+bar.hello();

@@ -1,12 +1,17 @@
 //! Module for running a Lox program.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::builtins::builtins;
 use crate::environment::{EnvRc, new_env_rc};
+use crate::evaluator::RuntimeError;
 use crate::evaluator::{RunError, evaluate, is_truthy};
-use crate::parser::ast::UserCallable;
-use crate::parser::{ASTree, Declaration, FunDecl, Literal, Statement};
+use crate::parser::ast::{LoxClass, UserCallable};
+use crate::parser::{
+    ASTree, Declaration, Expression, ExpressionEnum, FunDecl, Literal, Primary, PrimaryEnum, Span,
+    Statement,
+};
 use crate::resolver::{LocalsType, resolve};
 
 /// Program state
@@ -62,7 +67,43 @@ pub fn run_program(ast: &ASTree) -> Result<Literal, RunError> {
 
 /// Helper function to create a Literal::UserCallable from a FunDecl and its closure environment.
 fn make_callable(decl: &FunDecl, env: &EnvRc) -> Literal {
-    Literal::UserCallable(UserCallable::new(Rc::new(decl.clone()), Rc::clone(env)))
+    Literal::UserCallable(UserCallable {
+        decl: Rc::new(decl.clone()),
+        closure: Rc::clone(env),
+        is_initializer: false,
+    })
+}
+
+/// Helper function to evaluate the superclass expression in a class declaration, returning it as an
+/// Rc<LoxClass> if it exists and is valid, or None if no superclass is specified. Errors if the
+/// superclass expression is present but does not evaluate to a class.
+fn get_superclass(
+    class_decl: &crate::parser::ClassDecl,
+    state: &ProgramState,
+    locals_map: &LocalsType,
+) -> Result<Option<Rc<LoxClass>>, RunError> {
+    // If no superclass is specified, return None. Else, extract the superclass name and token ID.
+    let Some((superclass_name, superclass_id)) = &class_decl.superclass else {
+        return Ok(None);
+    };
+
+    // Create an expression for the superclass name.
+    let superclass_expr = Expression::new(
+        ExpressionEnum::Primary(Primary::new(
+            PrimaryEnum::Identifier(superclass_name.clone(), *superclass_id),
+            class_decl.span.clone(),
+        )),
+        class_decl.span.clone(),
+    );
+
+    // Evaluate the superclass expression and check that it evaluates to a class.
+    match evaluate(&superclass_expr, &state.env, locals_map)? {
+        Literal::Class(superclass) => Ok(Some(superclass)),
+        _ => Err(RunError::RuntimeError(RuntimeError {
+            message: format!("Superclass '{}' must be a class.", superclass_name),
+            span: Span::new(class_decl.span.start.clone(), class_decl.span.end.clone()),
+        })),
+    }
 }
 
 /// Runs a single declaration, updating the program state as needed.
@@ -72,7 +113,55 @@ pub fn run_decl(
     locals_map: &LocalsType,
 ) -> Result<Literal, RunError> {
     match decl {
-        Declaration::VarDecl(var_decl, _) => {
+        Declaration::ClassDecl(class_decl) => {
+            let superclass = get_superclass(class_decl, state, locals_map)?;
+
+            // If we have a superclass, create a new environment that has the current environment
+            // as its parent and binds `super` to the superclass, so that methods can resolve
+            // `super`.
+            let methods_env = if let Some(superclass) = &superclass {
+                let super_env = new_env_rc(Some(&state.env));
+                super_env
+                    .borrow_mut()
+                    .vars
+                    .insert("super".to_string(), Literal::Class(Rc::clone(superclass)));
+                super_env
+            } else {
+                Rc::clone(&state.env)
+            };
+
+            // Clone the class declaration's methods into UserCallables that capture the
+            // current environment as their closure.
+            let methods: HashMap<String, UserCallable> = class_decl
+                .methods
+                .iter()
+                .map(|method_decl| {
+                    (
+                        method_decl.name.clone(),
+                        UserCallable {
+                            decl: Rc::new(method_decl.clone()),
+                            closure: Rc::clone(&methods_env),
+                            // A class method is an initializer if its name is "init".
+                            is_initializer: method_decl.name == "init",
+                        },
+                    )
+                })
+                .collect();
+
+            // Create the LoxClass and insert it into the current environment before returning it.
+            let class = Literal::Class(Rc::new(LoxClass::new(
+                class_decl.name.clone(),
+                superclass,
+                methods,
+            )));
+            state
+                .env
+                .borrow_mut()
+                .vars
+                .insert(class_decl.name.clone(), class.clone());
+            Ok(class)
+        }
+        Declaration::VarDecl(var_decl) => {
             // Handle variable declaration, defaulting to nil if no initializer present.
             let val: Literal = if let Some(initializer) = &var_decl.initializer {
                 evaluate(initializer, &state.env, locals_map)?
@@ -88,7 +177,7 @@ pub fn run_decl(
             // of the initializer if present, or nil otherwise.
             Ok(val)
         }
-        Declaration::FunDecl(fun_decl, _) => {
+        Declaration::FunDecl(fun_decl) => {
             // Capture the current environment as the closure for lexical scoping.
             let closure: EnvRc = Rc::clone(&state.env);
             let callable: Literal = make_callable(fun_decl, &closure);
@@ -99,7 +188,7 @@ pub fn run_decl(
                 .insert(fun_decl.name.clone(), callable.clone());
             Ok(callable)
         }
-        Declaration::Statement(stmt, _) => run_stmt(stmt, state, locals_map),
+        Declaration::Statement(stmt) => run_stmt(stmt, state, locals_map),
     }
 }
 

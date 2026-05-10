@@ -1,0 +1,15 @@
+class Foo {
+  init(value) {
+    this.value = value;
+    return;
+  }
+}
+
+var foo = Foo("ok");
+print foo.value;
+
+foo.value2 = "hello";
+print foo.value2;
+
+foo.init("ko");
+print foo.value; // Changed to "ko"

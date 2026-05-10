@@ -1,0 +1,23 @@
+class Base {
+    hello() {
+        print "Hello from the base class!";
+    }
+
+    goodbye() {
+        print "Goodbye from the base class!";
+    }
+}
+
+class Derived < Base {
+    hello () {
+        print "Hello from the derived class!";
+    }
+}
+
+var foo = Base();
+foo.hello();
+foo.goodbye();
+
+var bar = Derived();
+bar.hello();
+bar.goodbye();

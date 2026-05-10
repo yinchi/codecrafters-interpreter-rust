@@ -18,6 +18,15 @@ pub type LocalsType = HashMap<usize, usize>;
 enum FunctionType {
     None,
     Function,
+    Method,
+    Initializer,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ClassType {
+    None,
+    Class,
+    Subclass,
 }
 
 #[derive(derive_new::new)]
@@ -33,6 +42,9 @@ struct Resolver {
 
     /// Tracks whether the resolver is currently inside a function body.
     current_function: FunctionType,
+
+    /// Tracks whether the resolver is currently inside a class declaration.
+    current_class: ClassType,
 }
 
 impl Resolver {
@@ -98,7 +110,93 @@ impl Resolver {
     /// Resolves variable references in the given declaration.
     fn resolve_declaration(&mut self, decl: &ast::Declaration) -> Result<(), String> {
         match decl {
-            ast::Declaration::FunDecl(fun_decl, _depth) => {
+            ast::Declaration::ClassDecl(class_decl) => {
+                // Enter a Class context to track that we're resolving inside a class declaration
+                let enclosing_class = self.current_class;
+                self.current_class = ClassType::Class;
+
+                // Declare and define the class name
+                self.declare(&class_decl.name, Some(&class_decl.span.start))?;
+                self.define(&class_decl.name)?;
+
+                // Resolve the superclass (if any). Reject cases like `class A < A { ... }`
+                // where a class tries to inherit from itself.
+                if let Some((superclass_name, superclass_loc)) = &class_decl.superclass {
+                    if superclass_name == &class_decl.name {
+                        return Err(format!(
+                            "[line {}:{}] Syntax error: a class can't inherit from itself.",
+                            class_decl.span.start.line, class_decl.span.start.col
+                        ));
+                    }
+
+                    // Change the class context to Subclass
+                    self.current_class = ClassType::Subclass;
+
+                    self.resolve_primary(&ast::Primary {
+                        p: ast::PrimaryEnum::Identifier(superclass_name.clone(), *superclass_loc),
+                        span: class_decl.span.clone(),
+                    })?;
+                }
+
+                // If in a subclass, create a new scope for `super` and bind it to allow method bodies to resolve `super`.
+                if self.current_class == ClassType::Subclass {
+                    self.begin_scope();
+                    self.declare("super", Some(&class_decl.span.start))?;
+                    self.define("super")?;
+                }
+
+                // Declare and define each method name in the class scope, then resolve the method bodies in a new scope.
+                for method in &class_decl.methods {
+                    // Enter a new Function scope for the method body
+                    let enclosing = self.current_function;
+                    self.current_function = if method.name == "init" {
+                        FunctionType::Initializer
+                    } else {
+                        FunctionType::Method
+                    };
+
+                    // Outer method scope holds `this`.
+                    self.begin_scope();
+
+                    // Bind `this` in method scope so method bodies can resolve it.
+                    self.declare("this", Some(&method.span.start))?;
+                    self.define("this")?;
+
+                    // Inner scope holds parameters and method locals.
+                    self.begin_scope();
+
+                    // Add the method parameters to the method body scope
+                    for (param, loc) in &method.params {
+                        self.declare(param, Some(loc))?;
+                        self.define(param)?;
+                    }
+
+                    // Resolve the method body block's declarations in the method body scope.
+                    if let ast::Statement::Block(decls) = method.body.as_ref() {
+                        for decl in decls {
+                            self.resolve_declaration(decl)?;
+                        }
+                    }
+
+                    // Exit the inner scope
+                    self.end_scope();
+
+                    // Exit the outer method scope, which also unbinds `this`, and restore the
+                    // enclosing function context.
+                    self.end_scope();
+                    self.current_function = enclosing;
+                }
+
+                // Exit the superclass scope (if any) and restore the enclosing class context.
+                if self.current_class == ClassType::Subclass {
+                    self.end_scope();
+                }
+
+                // Restore the enclosing class context.
+                self.current_class = enclosing_class;
+                Ok(())
+            }
+            ast::Declaration::FunDecl(fun_decl) => {
                 // Bind the function name in the current scope, then resolve the function body in a new scope.
                 self.declare(&fun_decl.name, None)?;
                 self.define(&fun_decl.name)?;
@@ -123,7 +221,7 @@ impl Resolver {
                 self.current_function = enclosing;
                 Ok(())
             }
-            ast::Declaration::VarDecl(var_decl, _depth) => {
+            ast::Declaration::VarDecl(var_decl) => {
                 // Declare the variable first (marking it as not yet fully initialized), then
                 // resolve the initializer expression (if any) before defining it.  This ordering
                 // ensures that the initializer cannot reference the variable being declared
@@ -135,7 +233,7 @@ impl Resolver {
                 self.define(&var_decl.name)?;
                 Ok(())
             }
-            ast::Declaration::Statement(stmt, _depth) => self.resolve_statement(stmt),
+            ast::Declaration::Statement(stmt) => self.resolve_statement(stmt),
         }
     }
 
@@ -152,6 +250,14 @@ impl Resolver {
                     ));
                 }
                 if let Some(expr) = &stmt.value {
+                    if self.current_function == FunctionType::Initializer {
+                        // We can use `return` in an initializer, but only with no value
+                        //(i.e. `return;`).
+                        return Err(format!(
+                            "[line {}] Error at 'return': Can't return a value from an initializer.",
+                            stmt.span.start.line
+                        ));
+                    }
                     self.resolve_expression(expr)?;
                 }
                 Ok(())
@@ -207,6 +313,12 @@ impl Resolver {
                 }
                 Ok(())
             }
+            // Field names are dynamic — only the object expression needs resolving.
+            ast::ExpressionEnum::Get(object, _name) => self.resolve_expression(object),
+            ast::ExpressionEnum::Set(object, _name, value) => {
+                self.resolve_expression(object)?;
+                self.resolve_expression(value)
+            }
         }
     }
 
@@ -243,6 +355,64 @@ impl Resolver {
                 self.locals.insert(*id, self.scopes.len());
                 Ok(())
             }
+            ast::PrimaryEnum::This(id) => {
+                if self.current_class == ClassType::None {
+                    return Err(format!(
+                        "[line {}:{}] Syntax error: Can't use 'this' outside of a class.",
+                        primary.span.start.line, primary.span.start.col
+                    ));
+                }
+
+                // Walk the scope stack from innermost to outermost to find the nearest enclosing
+                // class scope.
+                for (i, scope) in self.scopes.iter().rev().enumerate() {
+                    if let Some(&true) = scope.get("this") {
+                        // Record the depth for the `this` identifier and return.
+                        self.locals.insert(*id, i);
+                        return Ok(());
+                    }
+                }
+
+                // Resolver can't find `this` despite having a Class context — this should never
+                // happen if the resolver is correctly managing scopes, but we can return an error
+                // just in case.
+                Err(format!(
+                    "[line {}:{}] Syntax error: Can't use 'this' outside of a class.",
+                    primary.span.start.line, primary.span.start.col
+                ))
+            }
+            ast::PrimaryEnum::SuperDot(_method_name, id) => {
+                if self.current_class == ClassType::None {
+                    return Err(format!(
+                        "[line {}:{}] Syntax error: Can't use 'super' outside of a class.",
+                        primary.span.start.line, primary.span.start.col
+                    ));
+                }
+                if self.current_class != ClassType::Subclass {
+                    return Err(format!(
+                        "[line {}:{}] Syntax error: Can't use 'super' in a class with no superclass.",
+                        primary.span.start.line, primary.span.start.col
+                    ));
+                }
+
+                // Walk the scope stack from innermost to outermost to find the nearest scope
+                // defining `super`.
+                for (i, scope) in self.scopes.iter().rev().enumerate() {
+                    if let Some(&true) = scope.get("super") {
+                        // Record the depth for the `super` identifier and return.
+                        self.locals.insert(*id, i);
+                        return Ok(());
+                    }
+                }
+
+                // Resolver can't find `super` despite having a Subclass context — this should never
+                // happen if the resolver is correctly managing scopes, but we can return an error
+                // just in case.
+                Err(format!(
+                    "[line {}:{}] Syntax error: Can't use 'super' outside of a class.",
+                    primary.span.start.line, primary.span.start.col
+                ))
+            }
         }
     }
 }
@@ -252,6 +422,11 @@ impl Resolver {
 /// Local variables map to their lexical depth; global variables map to `scopes.len()`
 /// at the point of reference, which equals the number of hops to the global environment.
 pub fn resolve(prog: &ast::Program) -> Result<LocalsType, String> {
-    let mut resolver = Resolver::new(Vec::new(), HashMap::new(), FunctionType::None);
+    let mut resolver = Resolver::new(
+        Vec::new(),
+        HashMap::new(),
+        FunctionType::None,
+        ClassType::None,
+    );
     resolver.resolve_program(prog)
 }
