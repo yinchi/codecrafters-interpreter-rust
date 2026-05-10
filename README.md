@@ -20,7 +20,7 @@ Then, after finishing a task, we can push the changes to GitHub with the followi
 
 ```sh
 git switch gh-publish
-git merge origin/master --squash --allow-unrelated-histories
+git merge origin/master --squash --allow-unrelated-histories -X theirs
 git commit -m "<Message for squashed commit>"
 git push github gh-publish
 git switch master
