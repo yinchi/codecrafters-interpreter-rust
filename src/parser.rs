@@ -1,8 +1,24 @@
 //! Module for abstract syntax tree (AST) generation according to the Lox grammar.
+//!
+//! The `parser` module takes a list of tokens produced by the `tokenizer` and constructs an AST
+//! representing the structure of the Lox program.  The main entry point is the `parse` function,
+//! which returns an `ASTree` enum that can represent an expression, a statement, or a program.
+//!
+//! The Lox grammar and this parser implementation are based on recursive descent.  For example,
+//! an `expression` can be an `assignment`, which in turn can be a `logic_or`, and so on down
+//! through `logic_and`, `equality`, `comparison`, `term`, `factor`, `unary`, `call`, and finally
+//! `primary` expressions.  In other words, although a primary expression is not literally a
+//! logical or, it can appear in the AST wherever a logical or can appear, as its precedence is
+//! lower than or equal to that of a logical or.
+//!
+//! Each of these levels of the grammar has a corresponding `parse_`
+//! function that implements the parsing logic for that level, and calls down to the next level as
+//! needed. The precedence rules are enforced by the structure of the `parse_` functions, not by
+//! the AST node types.
 
 use std::{fmt::Debug, rc::Rc};
 
-use super::tokenizer::Token;
+use crate::tokenizer::Token;
 
 pub mod ast;
 pub mod span;
@@ -935,6 +951,7 @@ fn parse_while_stmt(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String>
 /// Triggered only when we see `for`, thus no fall-through.
 ///
 /// Inserted into the AST as:
+/// ```text
 /// (block
 ///     (<dassign! or assign!> <name> <value>)?  ; loop variable declaration or assignment
 ///     (while
@@ -945,6 +962,7 @@ fn parse_while_stmt(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String>
 ///         )
 ///     )
 /// )
+/// ```
 ///
 /// `forStmt         → "for" "(" ( varDecl | exprStmt | ";" ) expression? ";" expression? ")" statement ;`
 fn parse_for_stmt(tokens: &[Token], pos: &mut usize) -> Result<ASTree, String> {

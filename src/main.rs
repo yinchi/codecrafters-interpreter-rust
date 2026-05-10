@@ -1,3 +1,8 @@
+//! An interpreter for the Lox language, as specified in the
+//! [Crafting Interpreters](https://craftinginterpreters.com/) book by Bob Nystrom.
+//! This is a Rust implementation of the Lox interpreter, following the
+//! "[Build Your Own Interpreter](https://codecrafters.io/challenges/interpreter)"
+//! code challenge from Codecrafters.
 mod builtins;
 mod environment;
 mod evaluator;
@@ -10,13 +15,11 @@ mod tokenizer;
 use std::env;
 use std::fs;
 
-use evaluator::{RunError, evaluate, handle_runtime_error};
-use parser::parse;
-use runner::{ProgramState, run_program};
-use tokenizer::tokenize;
-
-use crate::parser::ASTree;
+use crate::evaluator::{RunError, evaluate, handle_runtime_error};
+use crate::parser::{ASTree, parse};
 use crate::resolver::LocalsType;
+use crate::runner::{ProgramState, run_program};
+use crate::tokenizer::tokenize;
 
 const EXIT_CODE_SYNTAX_ERROR: i32 = 65;
 const EXIT_CODE_RUNTIME_ERROR: i32 = 70;

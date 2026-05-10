@@ -1,4 +1,10 @@
 //! Module for tokenizing input strings into a list of tokens according to the Lox grammar.
+//!
+//! The `tokenize` function is the main entry point, which takes an input string and returns a list
+//! of tokens. The `Tokenizer` struct implements a finite-state machine to process the input
+//! character by character, handling different token types and accumulating characters for
+//! multi-character tokens.  The `Token` struct represents individual tokens with their type, lexeme,
+//! literal value, and line/position information for error reporting.
 
 use std::fmt::Debug;
 

@@ -93,7 +93,8 @@ pub struct ExprStmt {
     pub span: Span,
 }
 
-/// An if statement in the AST.
+/// An if statement in the AST.  Must contain a `condition` and `then_branch`, and may optionally
+/// contain an `else_branch`.
 ///
 /// `ifStmt         → "if" "(" expression ")" statement ( "else" statement )? ;`
 #[derive(derive_new::new)]
@@ -115,7 +116,9 @@ pub struct PrintStmt {
     pub span: Span,
 }
 
-/// A return statement in the AST.
+/// A return statement in the AST.  A return value is optional; if no return value is provided, the
+/// `value` field will be `None` and the interpreter will return `nil` when executing this
+/// statement.
 ///
 /// `returnStmt     → "return" expression? ";" ;`
 pub struct ReturnStmt {
@@ -137,7 +140,7 @@ pub struct WhileStmt {
 
 /** An expression in the AST.
 
-```
+```ebnf
 expression     → assignment ;
 assignment     → ( call "." )? IDENTIFIER "=" assignment
                | logic_or ;
@@ -155,7 +158,8 @@ primary        → NUMBER | STRING | "true" | "false" | "nil"
 ```
 
 Note, for example, that "comparison" really means any expression at the comparison level or lower,
-i.e. a primary expression will also match the unary, ..., and equality rules.
+i.e. term, factor, unary, call, or primary expressions.  The precedence rules are handled by the
+parse functions, not by the AST node types.
 */
 pub enum ExpressionEnum {
     /*
@@ -196,6 +200,7 @@ pub struct Primary {
     pub span: Span,
 }
 
+/// The different variants of primary expressions in the AST.
 pub enum PrimaryEnum {
     Literal(Literal),
     Grouping(Box<Expression>),
@@ -218,7 +223,7 @@ pub enum Literal {
     Nil,
 }
 
-/// A user-defined class value.
+/// A user-defined class in Lox.
 #[derive(Clone, derive_new::new)]
 pub struct LoxClass {
     pub name: String,
@@ -228,9 +233,11 @@ pub struct LoxClass {
     id: Rc<()>,
 }
 
+/// A reference-counted pointer to a `LoxInstance`, wrapped in a `RefCell` to allow interior
+/// mutability for field updates.
 pub type InstanceRc = Rc<RefCell<LoxInstance>>;
 
-/// A user-defined class instance value.
+/// A user-defined class instance in Lox.
 #[derive(Clone, derive_new::new)]
 pub struct LoxInstance {
     pub class: Rc<LoxClass>,

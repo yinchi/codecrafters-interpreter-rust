@@ -1,0 +1,45 @@
+@startebnf
+title The Lox Grammar
+
+program        = {declaration}, EOF ;
+
+declaration    = classDecl | funDecl | varDecl | statement ;
+
+classDecl      = "class", IDENTIFIER, [ "<", IDENTIFIER ], "{", { function }, "}" ;
+funDecl        = "fun", function ;
+varDecl        = "var", IDENTIFIER, [ "=", expression ], ";" ;
+statement      = exprStmt | ifStmt | printStmt | returnStmt | whileStmt | forStmt | block ;
+
+function       = IDENTIFIER, "(", [ parameters ], ")", block ;
+parameters     = IDENTIFIER, { ",", IDENTIFIER } ;
+arguments      = expression, { ",", expression } ;
+
+exprStmt       = expression, ";" ;
+
+ifStmt         = "if", "(", expression, ")", statement, [ "else", statement ] ;
+printStmt      = "print", expression, ";" ;
+returnStmt     = "return", [ expression ], ";" ;
+whileStmt      = "while", "(", expression, ")", statement ;
+forStmt        = "for", "(", ( varDecl | exprStmt | ";" ), [ expression ], ";", [ expression ], ")", statement ;
+block          = "{", { declaration }, "}" ;
+
+expression     = assignment ;
+assignment     = [ call, "." ], IDENTIFIER, "=", assignment | logic_or ;
+logic_or       = logic_and, { "or", logic_and } ;
+logic_and      = equality, { "and", equality } ;
+
+equality       = comparison, { ( "!=" | "==" ), comparison } ;
+comparison     = term, { ( ">" | ">=" | "<" | "<=" ), term } ;
+term           = factor, { ( "-" | "+" ), factor } ;
+factor         = unary, { ( "/" | "*" ), unary } ;
+unary          = ( "!" | "-" ), unary | call ;
+call           = primary, { ( "(", [ arguments ], ")" ) | ( ".", IDENTIFIER ) } ;
+primary        = NUMBER | STRING | "true" | "false" | "nil" | "(", expression, ")" |
+                 IDENTIFIER | "this" | "super", "." , IDENTIFIER ;
+
+NUMBER        = DIGIT, { DIGIT }, [ ".", DIGIT, { DIGIT } ] ;
+STRING        = '"', { ? any character but " ? }, '"' ;
+IDENTIFIER    = ALPHA, { ALPHA | DIGIT | "_" } ;
+DIGIT         = ?0 to 9? ;
+ALPHA         = ?a-z or A-Z? ;
+@endebnf

@@ -38,19 +38,11 @@ impl From<ExpressionEnum> for Expression {
             }
 
             // For the following, full span is `<left> <_op> <right>`
-            ExpressionEnum::Factor(_op, left, right) => {
-                Span::new(left.span.start.clone(), right.span.end.clone())
-            }
-            ExpressionEnum::Term(_op, left, right) => {
-                Span::new(left.span.start.clone(), right.span.end.clone())
-            }
-            ExpressionEnum::Comparison(_op, left, right) => {
-                Span::new(left.span.start.clone(), right.span.end.clone())
-            }
-            ExpressionEnum::Equality(_op, left, right) => {
-                Span::new(left.span.start.clone(), right.span.end.clone())
-            }
-            ExpressionEnum::Logical(_op, left, right) => {
+            ExpressionEnum::Factor(_op, left, right)
+            | ExpressionEnum::Term(_op, left, right)
+            | ExpressionEnum::Comparison(_op, left, right)
+            | ExpressionEnum::Equality(_op, left, right)
+            | ExpressionEnum::Logical(_op, left, right) => {
                 Span::new(left.span.start.clone(), right.span.end.clone())
             }
 
@@ -114,9 +106,9 @@ impl PartialEq for Literal {
 }
 
 impl Display for Literal {
-    /// Called with printing a Literal with the {} formatter. Displays integers as-is (no ".0").
-    /// Use the Debug implementation (with ".0") for the parse step and Display for the
-    /// evaluation/execution steps.
+    /** Called with printing a `Literal` with the {} formatter. Displays integers as-is (no ".0").
+    Use the `Debug` implementation (with ".0") for the parse step and `Display` for the
+    evaluation/execution steps. */
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Literal::Number(n) => write!(f, "{n}"),
@@ -141,12 +133,15 @@ impl Debug for Operator {
 impl Debug for Program {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut result = String::new();
-        // Print:
-        // (prog
-        //   stmt1
-        //   stmt2
-        //   ...
-        // )
+        /* Prints:
+
+        (prog
+          <decl1>
+          <decl2>
+          ...
+        )
+
+        */
         result.push_str("(prog\n");
         for decl in &self.declarations {
             let decl_str = format!("{:?}", decl);
@@ -373,10 +368,10 @@ impl Debug for PrimaryEnum {
 }
 
 impl Debug for Literal {
-    /// Called when printing a Literal with the {:?} formatter.
-    /// Formats numbers with at least one decimal place as expected for the parsing step.
-    /// Use the Debug implementation (with ".0") for the parse step and Display for the
-    /// evaluation/execution steps.
+    /** Called when printing a `Literal` with the {:?} formatter.
+    Formats numbers with at least one decimal place as expected for the parsing step.
+    Use the `Debug` implementation (with ".0") for the parse step and `Display` for the
+    evaluation/execution steps. */
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Literal::Number(n) => {

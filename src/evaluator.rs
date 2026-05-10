@@ -15,11 +15,9 @@ use std::rc::Rc;
 
 use super::EXIT_CODE_RUNTIME_ERROR;
 use crate::environment::{EnvRc, Environment, new_env_rc};
-use crate::parser::ast::{
-    Expression, ExpressionEnum, Literal, Operator, Primary, PrimaryEnum, Statement,
-};
 use crate::parser::{
-    Arguments, Location, LoxClass, LoxInstance, NativeCallable, Span, UserCallable,
+    Arguments, Expression, ExpressionEnum, InstanceRc, Literal, Location, LoxClass, LoxInstance,
+    NativeCallable, Operator, Primary, PrimaryEnum, Span, Statement, UserCallable,
 };
 use crate::resolver::LocalsType;
 use crate::runner::ProgramState;
@@ -282,7 +280,7 @@ fn eval_user_call(
 /// Bind a method to an instance by creating a new closure that extends the method's existing
 /// closure with a new scope that binds `this` to the instance.  This allows the method to access
 /// the instance via `this` when called.
-fn bind_method(method: &UserCallable, instance: &Rc<RefCell<LoxInstance>>) -> UserCallable {
+fn bind_method(method: &UserCallable, instance: &InstanceRc) -> UserCallable {
     let bound_closure = new_env_rc(Some(&method.closure));
     bound_closure
         .borrow_mut()

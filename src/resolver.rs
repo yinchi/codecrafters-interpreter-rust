@@ -8,6 +8,8 @@ use std::collections::HashMap;
 
 use crate::parser::{Location, ast};
 
+/// A stack of scopes, where each scope is a mapping of variable names to a boolean indicating
+/// whether the variable has been fully initialized (`true`) or only declared (`false`).
 type ScopesType = Vec<HashMap<String, bool>>;
 
 /// Mapping of identifier IDs to their corresponding scope depth.
@@ -29,10 +31,18 @@ enum ClassType {
     Subclass,
 }
 
+/** Context for resolving variable references in the AST.  The resolver walks the AST and tracks
+ * the current scope stack and variable declarations to resolve variable references and detect
+ * resolver errors (e.g. referencing a variable in its own initializer, or using `this` outside of
+ * a class).  The resolver produces a mapping of identifier IDs to their scope depth, which is
+ * used by the interpreter to look up variable values at runtime.
+ */
 #[derive(derive_new::new)]
 struct Resolver {
     /// Stack of scopes, where each scope is a mapping of variable names to a boolean indicating
     /// whether the variable has been fully initialized (`true`) or only declared (`false`).
+    /// An empty stack means we're in the global scope.  Scopes can be pushed and popped using
+    /// `begin_scope` and `end_scope`.
     scopes: ScopesType,
 
     /// Mapping of identifier IDs to their corresponding scope depth. This is used to resolve
@@ -81,8 +91,9 @@ impl Resolver {
         Ok(())
     }
 
-    /// Defines a variable in the current scope.  This should be called after the variable's initializer
-    /// expression (if any) has been resolved, to indicate that the variable is fully initialized and can be referenced.
+    /// Defines a variable in the current scope.  This should be called after the variable's
+    /// initializer expression (if any) has been resolved, to indicate that the variable is fully
+    /// initialized and can be referenced.
     fn define(&mut self, name: &str) -> Result<(), String> {
         if let Some(scope) = self.scopes.last_mut() {
             if scope.contains_key(name) {
@@ -138,14 +149,16 @@ impl Resolver {
                     })?;
                 }
 
-                // If in a subclass, create a new scope for `super` and bind it to allow method bodies to resolve `super`.
+                // If in a subclass, create a new scope for `super` and bind it to allow method
+                // bodies to resolve `super`.
                 if self.current_class == ClassType::Subclass {
                     self.begin_scope();
                     self.declare("super", Some(&class_decl.span.start))?;
                     self.define("super")?;
                 }
 
-                // Declare and define each method name in the class scope, then resolve the method bodies in a new scope.
+                // Declare and define each method name in the class scope, then resolve the method
+                // bodies in a new scope.
                 for method in &class_decl.methods {
                     // Enter a new Function scope for the method body
                     let enclosing = self.current_function;

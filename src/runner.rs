@@ -7,14 +7,17 @@ use crate::builtins::builtins;
 use crate::environment::{EnvRc, new_env_rc};
 use crate::evaluator::RuntimeError;
 use crate::evaluator::{RunError, evaluate, is_truthy};
-use crate::parser::ast::{LoxClass, UserCallable};
 use crate::parser::{
-    ASTree, Declaration, Expression, ExpressionEnum, FunDecl, Literal, Primary, PrimaryEnum, Span,
-    Statement,
+    ASTree, Declaration, Expression, ExpressionEnum, FunDecl, Literal, LoxClass, Primary,
+    PrimaryEnum, Span, Statement, UserCallable,
 };
 use crate::resolver::{LocalsType, resolve};
 
-/// Program state
+/// Program state, containing the current environment.  This is passed around and updated as we
+/// run the program.  A new ProgramState is initialized with a global environment containing all
+/// built-in functions, and then each declaration is run in sequence, updating the environment as
+/// needed (e.g. to add new variable bindings or class definitions, or swapping environments
+/// to enter a new scope).
 pub struct ProgramState {
     /// The current environment (lexically scoped, Rc-shared so closures can capture it).
     pub env: EnvRc,
@@ -75,7 +78,7 @@ fn make_callable(decl: &FunDecl, env: &EnvRc) -> Literal {
 }
 
 /// Helper function to evaluate the superclass expression in a class declaration, returning it as an
-/// Rc<LoxClass> if it exists and is valid, or None if no superclass is specified. Errors if the
+/// `Rc<LoxClass>` if it exists and is valid, or None if no superclass is specified. Errors if the
 /// superclass expression is present but does not evaluate to a class.
 fn get_superclass(
     class_decl: &crate::parser::ClassDecl,

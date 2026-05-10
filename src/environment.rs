@@ -1,10 +1,31 @@
 //! Environment (scope) for Lox variable bindings.
+//!
+//! The `Environment` struct represents a single scope of variable bindings, and the `EnvRc` type
+//! is a reference-counted pointer to an `Environment`, allowing multiple closures to share the
+//! same environment.  The `new_env_rc` function is a helper for creating a new `EnvRc`, optionally
+//! chained to a parent environment.
+//!
+//! The `Environment` struct has two main fields:
+//!
+//! - `vars`, a `HashMap` that stores variable names and their corresponding `Literal` values.
+//! - `parent`, an optional `EnvRc` that points to the parent environment, enabling lexical scoping.
+//!
+//! The `Environment` struct also has two key methods:
+//!
+//! - `get_at`, which looks up a variable at a specific distance up the environment chain and
+//!   returns its value if found.
+//! - `assign_at`, which assigns a new value to a variable at a specific distance up the
+//!   environment chain, returning `true` if the variable was found and updated, `false` if the
+//!   name is absent at that scope.
+//!
+//! The appropiate distance for variable lookups and assignments is determined by the *resolver*,
+//! which computes the distance for each variable during the static analysis phase.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::parser::ast::Literal;
+use crate::parser::Literal;
 
 /// An `Rc<RefCell<Environment>>` is used to represent the current environment, which is shared
 /// between the main program and any closures that capture it. The `Rc` allows multiple closures to
